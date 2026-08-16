@@ -1,0 +1,12 @@
+[package]
+name = "cursdel-policy"
+description = "Edition/capability policy resolved from a verified licence, consumed by cursdel-cli."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }

@@ -1,0 +1,18 @@
+[package]
+name = "cursdel-linux"
+description = "Native Linux deletion engine (openat/unlinkat/statx via libc, Unix permission handling)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cursdel-core = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

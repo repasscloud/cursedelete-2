@@ -1,0 +1,38 @@
+[package]
+name = "cursdel-cli"
+description = "CurseDelete command-line interface (binary: cursdel)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cursdel"
+path = "src/main.rs"
+
+[dependencies]
+cursdel-core = { workspace = true }
+cursdel-policy = { workspace = true }
+cursdel-license = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+ctrlc = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+cursdel-windows = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cursdel-linux = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cursdel-macos = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
