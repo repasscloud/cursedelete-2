@@ -1,0 +1,25 @@
+{
+  "format": "software-license-v1",
+  "algorithm": "ECDSA-P256-SHA256",
+  "keyId": "test2026",
+  "license": {
+    "licenseId": "LIC-TEST-0001",
+    "customer": "Acme \u0026 S\u00F8ns \u003CPty\u003E Ltd\u0027s \u0022Caf\u00E9\u0022  \u2764\uFE0F\uD83D\uDE00",
+    "issuedAt": "2026-08-12T06:30:00Z",
+    "metadata": {
+      "purchaseOrder": "PO-88429",
+      "contactEmail": "weird\u002Bchars@example.com",
+      "note": "quotes \u0022 and backslash \\ and tab\tand newline\nend and slash/and *star* and 100% and (paren) and {brace} and [bracket] and grave\u0060tick and tilde~end"
+    },
+    "entitlements": [
+      {
+        "product": "cursedelete",
+        "edition": "business",
+        "licenseType": "perpetual",
+        "seats": 5,
+        "updatesUntil": "2027-08-12"
+      }
+    ]
+  },
+  "signature": "PX9DcTP1BNw463pnuPx\u002BypeGmnF\u002BlcF0lNaadFTWNePo2aqSVYEzY7OiNhWIjtKURvl21rfO/s0bEEYjNaqY6g=="
+}

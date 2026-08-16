@@ -1,0 +1,19 @@
+{
+  "format": "software-license-v1",
+  "algorithm": "ECDSA-P256-SHA256",
+  "keyId": "test2026",
+  "license": {
+    "licenseId": "LIC-TEST-0002",
+    "customer": " !\u0022#$%\u0026\u0027()*\u002B,-./0123456789:;\u003C=\u003E?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_\u0060abcdefghijklmnopqrstuvwxyz{|}~\r\n\t\b\f\u00E9\u00F8\u2764\uFE0F\uD83D\uDE00\u2028\u2029",
+    "issuedAt": "2026-08-12T06:30:00Z",
+    "entitlements": [
+      {
+        "product": "cursedelete",
+        "edition": "business",
+        "licenseType": "perpetual",
+        "seats": 1
+      }
+    ]
+  },
+  "signature": "rIYd/OxIyR0aROG4/2c5RVJYJlglPBeUTQ23Pf89d3xM6WPT64Dr9FVjG3BMvDFi1r1gN/XXCsuLhSiPm\u002BFugQ=="
+}
