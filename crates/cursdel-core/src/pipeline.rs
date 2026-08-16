@@ -125,6 +125,13 @@ pub fn run(
 
     let tracker = DirectoryTracker::new(dir_tx);
     tracker.register_directory(DirId(0), None, target.canonical.clone());
+    // The root itself is never emitted as a discovered EnumEvent (it's
+    // the walk's starting point, not a child of anything within this
+    // operation), so it would otherwise be absent from `dirs_scanned`
+    // while still counting toward `dirs_deleted`/`dirs_retained` --
+    // counted here so the report's "scanned" and "deleted" directory
+    // totals stay coherent with each other.
+    metrics.dirs_scanned.fetch_add(1, Ordering::Relaxed);
 
     let preserve_root = options.preserve_root();
 

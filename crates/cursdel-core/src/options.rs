@@ -45,6 +45,57 @@ pub enum WorkerPolicy {
     Fixed(usize),
 }
 
+impl std::str::FromStr for WorkerPolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.eq_ignore_ascii_case("auto") {
+            return Ok(WorkerPolicy::Auto);
+        }
+        match s.parse::<usize>() {
+            Ok(0) => Err("--workers must be 'auto' or a positive integer, not 0".to_string()),
+            Ok(n) => Ok(WorkerPolicy::Fixed(n)),
+            Err(_) => Err(format!(
+                "--workers value '{s}' is not 'auto' or a positive integer"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for WorkerPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkerPolicy::Auto => write!(f, "auto"),
+            WorkerPolicy::Fixed(n) => write!(f, "{n}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_auto_case_insensitively() {
+        assert_eq!("auto".parse::<WorkerPolicy>().unwrap(), WorkerPolicy::Auto);
+        assert_eq!("AUTO".parse::<WorkerPolicy>().unwrap(), WorkerPolicy::Auto);
+    }
+
+    #[test]
+    fn parses_positive_integers() {
+        assert_eq!(
+            "64".parse::<WorkerPolicy>().unwrap(),
+            WorkerPolicy::Fixed(64)
+        );
+    }
+
+    #[test]
+    fn rejects_zero_and_garbage() {
+        assert!("0".parse::<WorkerPolicy>().is_err());
+        assert!("banana".parse::<WorkerPolicy>().is_err());
+    }
+}
+
 /// The fully resolved options for one `cursdel` invocation.
 #[derive(Debug, Clone)]
 pub struct OperationOptions {
