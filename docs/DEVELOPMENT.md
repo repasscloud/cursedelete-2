@@ -89,8 +89,8 @@ rather than requiring real NVMe/HDD/SMB hardware in CI.
 cargo test --workspace
 ```
 
-This runs all unit and integration tests across every crate (167 passing
-as of this writing: 76 in `cursdel-core`, 44 in `cursdel-license`, 25 CLI
+This runs all unit and integration tests across every crate (179 passing
+as of this writing: 76 in `cursdel-core`, 49 in `cursdel-license`, 32 CLI
 integration tests in `cursdel-cli`, 18 in `cursdel-macos`, 4 in
 `cursdel-policy`; `cursdel-linux` and `cursdel-windows` currently run 0 of
 their own on a macOS host since both are `cfg`-gated to their target OS —
