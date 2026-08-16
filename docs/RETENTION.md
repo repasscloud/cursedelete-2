@@ -88,18 +88,43 @@ best-effort and can be affected by mount options or the specific
 filesystem/volume in use — don't build a policy around sub-second accuracy
 of "last read."
 
-### Linux (not yet implemented)
+### Linux (implemented)
 
-The `cursdel-linux` platform engine is a stub as of this writing (see
-[README.md](../README.md#platform-support) for current status) — there is
-no shipping behavior to document here yet. When implemented, `created`
-availability will depend on the underlying filesystem and kernel: ext4 with
-`statx()` can report a birth time, but plenty of real-world Linux
-deployments still run filesystems or kernels where it is unavailable, in
-which case `--age-by created` would retain those files (per the
-unavailable-timestamp rule above) rather than silently falling back to a
-different timestamp. Treat this as a known open question to verify once
-the Linux engine ships, not a documented guarantee either way.
+The Linux engine (`crates/cursdel-linux/src/dirlist.rs`) calls `statx(2)`
+(requesting `STATX_BASIC_STATS | STATX_BTIME` in one syscall) rather than
+classic `fstatat`, specifically because classic `stat`/`fstatat` has no
+creation-time field on Linux at all — `statx` is the only way to ask for
+one. Whether `created` actually comes back populated depends on the
+underlying filesystem and kernel, and this engine checks that explicitly
+per call (via `statx`'s `stx_mask` result) rather than assuming it:
+
+- **ext4 and btrfs** populate birth time; `--age-by created` works as
+  expected on the filesystems most Linux deployments actually use.
+- **tmpfs and some network/FUSE filesystems** do not report a birth time
+  even though the `statx` call itself succeeds — `created` is `None` for
+  files there, so those files are **retained** under `--age-by created`
+  (per the unavailable-timestamp rule above), never silently deleted on a
+  guessed or substituted timestamp.
+- **Pre-4.11 kernels, or a container/seccomp profile that blocks `statx`
+  entirely** — the engine falls back to plain `fstatat`, which reports
+  `modified` and `accessed` normally but `created` as `None` unconditionally
+  (there is no fallback source for creation time to fall back *to* on
+  Linux).
+
+See [ADR-0008](adr/0008-linux-engine.md) for the full reasoning. The
+`STATX_BTIME`-populated path is validated by cross-compilation and unit
+tests that check internal consistency (creation time never reported after
+modification time); actually observing `STATX_BTIME` set on a live ext4
+volume is one of the `TODO(linux-ci)` items pending validation on real
+Linux hardware — the test suite deliberately does not assert `created` is
+always `Some`, since that would make the test fail on any CI runner backed
+by a filesystem that doesn't populate it (tmpfs, `/tmp` on some
+containers).
+
+`--age-by accessed` carries the general caveat below, plus Linux is the
+platform where it applies most often in practice: `relatime` (the common
+Linux default) only updates access time once per day or on writes, and
+`noatime` disables the update entirely.
 
 ### Windows (implemented)
 

@@ -15,6 +15,7 @@ wherever a decision needs justification rather than restatement.
 | [0004](0004-licensing-integration.md) | Licensing integration architecture | Why the license verifier is a from-scratch, byte-exact Rust reimplementation of the .NET `Licensing.Core` signing scheme rather than an FFI bridge or sidecar process, how it was validated against real C#-signed fixtures, and why credentials are stored in a protected file rather than an OS keychain. |
 | [0005](0005-symlink-reparse-safety.md) | Symlink/reparse-point safety and the two-layer root check | The two independent guarantees that are easy to conflate — resolving symlinks to catch a disguised root at the target argument, versus never resolving symlinks discovered inside the tree during enumeration — and why they need opposite handling. |
 | [0006](0006-posix-toctou.md) | TOCTOU mitigation on POSIX delete operations | The `openat`/`unlinkat`/`fstatat`-relative delete pattern that closes the final-component race, and the honestly-documented residual risk it does *not* close (an ancestor directory replaced mid-walk, several levels up). |
+| [0008](0008-linux-engine.md) | Linux native engine | Why creation time uses `statx` with a `fstatat`/`None` fallback rather than always reporting `None`, why `opendir`/`readdir` ships instead of raw `getdents64`, and why `--kill-locks` lock-holder discovery reads `/proc/[pid]/fd/*` natively instead of shelling out to `lsof` the way the macOS engine does. |
 
 ## Adding a new ADR
 

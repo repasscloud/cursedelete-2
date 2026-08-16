@@ -26,9 +26,9 @@ CurseDelete terminating something it shouldn't just to force progress.
 |---|---|---|
 | macOS | **Implemented** | Shells out to `lsof -t <path>` to enumerate holding PIDs, then sends `SIGTERM` to each non-protected PID. |
 | Windows | **Implemented** | Windows Restart Manager (`RmStartSession`/`RmRegisterResources`/`RmGetList`) identifies holders; since `RmShutdown` only politely asks a process to close via `WM_QUERYENDSESSION` (which most non-GUI/service processes never answer), the engine terminates the identified holder directly via `TerminateProcess`, then waits on the process handle for actual exit before returning. Protects the current process, anything Restart Manager itself flags critical, a system-process name denylist, and (conservatively) any holder whose executable name can't even be resolved. See [ADR-0007](adr/0007-windows-engine.md). Validated by cross-compilation and unit tests; a live second process to terminate needs a real Windows session (`TODO(windows-ci)`). |
-| Linux | Planned, not yet implemented | The `cursdel-linux` engine is currently a stub — see [README.md](../README.md#platform-support). A `/proc`-based holder search (scanning `/proc/*/fd` symlinks) is the natural equivalent, but nothing is shipped yet. |
+| Linux | **Implemented** | Walks `/proc/[pid]/fd/*` natively (no subprocess), reading each descriptor's `readlink()` target and comparing it against the canonicalised target path, then sends `SIGTERM` to each non-protected holding PID. Protects the current process, PID 1, and PID 2 (`kthreadd`); best-effort skips other kernel threads (direct children of PID 2) during the scan itself. See [ADR-0008](adr/0008-linux-engine.md). Validated by cross-compilation and unit tests, including a real end-to-end check of the `/proc` walk against this process's own open file handle; a live *second* process to terminate needs a real Linux session (`TODO(linux-ci)`). |
 
-### Why macOS shells out to `lsof`
+### Why macOS shells out to `lsof` (and Linux doesn't need to)
 
 Darwin has no equivalent of Windows Restart Manager. The standard way to
 identify which process holds a file open is the same query `lsof` itself
@@ -43,6 +43,20 @@ subprocess dependency) is recorded as documented follow-up work in
 `lsof` exiting non-zero because nothing has the file open is treated as a
 valid, empty result, not an error — only a genuinely unrunnable `lsof` (not
 installed, permission denied) is reported as the lock being unresolvable.
+
+Linux does not need this workaround: `/proc/[pid]/fd/*` are symlinks to
+every file descriptor a process has open, readable directly with
+`readlink()` and no external tool involved — the same technique `lsof`/
+`fuser` use internally on Linux, just without the subprocess, the
+dependency on an external binary being installed and on `$PATH` (not
+guaranteed on minimal container/server images), or the risk of parsing
+another program's undocumented text-output format. `EACCES` reading
+another user's `/proc/[pid]/fd` (expected — introspecting a process you
+don't own requires privilege you may not have) and `ENOENT` (the process
+exited mid-scan) are both treated as "skip this PID," not scan failures;
+only `/proc` itself being unreadable is reported as the mechanism being
+unavailable. See [ADR-0008](adr/0008-linux-engine.md) for the full
+comparison against the macOS approach.
 
 ### Verified failure behavior when disabled
 
@@ -119,8 +133,8 @@ needs validation against a real file server (`TODO(windows-ci)` in
 `crates/cursdel-windows/src/lock.rs`) — see
 [ADR-0007](adr/0007-windows-engine.md).
 
-On macOS (and Linux, once implemented), `--close-remote-locks` is always
-reported unsupported, per the product's Windows-server-only requirement:
+On macOS and Linux, `--close-remote-locks` is always reported unsupported,
+per the product's Windows-server-only requirement:
 
 ```console
 # from cursdel-macos/src/lock.rs::resolve_remote_lock, verified by its own test suite

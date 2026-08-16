@@ -49,8 +49,7 @@ crates/
 │                       client. No dependency on cursdel-core.
 ├── cursdel-macos/      native macOS deletion engine (implemented).
 ├── cursdel-windows/    native Windows deletion engine (implemented).
-└── cursdel-linux/      native Linux deletion engine (stub — see
-                        "Platform implementation status" below).
+└── cursdel-linux/      native Linux deletion engine (implemented).
 ```
 
 Each platform crate implements exactly one trait,
@@ -74,7 +73,7 @@ implementations' approaches.
 |---|---|
 | macOS | Implemented, tested. Reference implementation for the `PlatformEngine` trait. |
 | Windows | Implemented (`FindFirstFileExW` enumeration, `FILE_DISPOSITION_INFO_EX` deletion with a classic fallback, ownership/ACL remediation, Restart Manager for `--kill-locks`, `NetFileEnum`/`NetFileClose` for `--close-remote-locks` — see [ADR-0007](adr/0007-windows-engine.md)). Validated by cross-compilation (`cargo check`/`clippy` for `x86_64-pc-windows-msvc` and `x86_64-pc-windows-gnu`) and unit tests for all logic that doesn't require a live Windows session; real-filesystem behaviour is marked with `TODO(windows-ci)` comments pending validation on an actual Windows machine. |
-| Linux | Not yet implemented (`crates/cursdel-linux/src/lib.rs` is a stub — `// Implemented in a later step.`). |
+| Linux | Implemented (`openat`/`unlinkat` deletion with the same TOCTOU-mitigation pattern as macOS, `statx` metadata with an `fstatat` fallback for kernels/filesystems without `STATX_BTIME`, native `/proc/[pid]/fd`-based lock-holder discovery for `--kill-locks` — see [ADR-0008](adr/0008-linux-engine.md)). Validated by cross-compilation (`cargo check`/`clippy` for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`) and unit tests for all logic that doesn't require a live Linux session; real-filesystem behaviour is marked with `TODO(linux-ci)` comments pending validation on actual Linux hardware. |
 
 `cursdel-core` (the streaming pipeline, adaptive worker controller, target
 safety, filters, retention, and reporting) is fully platform-independent

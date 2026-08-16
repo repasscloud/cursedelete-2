@@ -10,12 +10,11 @@ the CLI binary is `cursdel`.
 
 ## Status
 
-The core engine, macOS platform engine, Windows platform engine, license
-verification, and CLI are implemented and tested. The Linux platform
-engine is a stub under active development — see
-[Platform support](#platform-support) below for exactly what that means
-today. This is pre-release software; no versioned release binaries are
-published yet.
+The core engine, all three platform engines (macOS, Windows, Linux),
+license verification, and CLI are implemented and tested — see
+[Platform support](#platform-support) below for exactly what "tested"
+means per platform. This is pre-release software; no versioned release
+binaries are published yet.
 
 ## Install
 
@@ -40,7 +39,7 @@ run.
 |---|---|
 | macOS | **Implemented and tested.** Native Darwin/POSIX primitives (`openat`/`unlinkat`/`fstatat`), the reference implementation of the `PlatformEngine` trait. |
 | Windows | **Implemented.** Native Win32 primitives (`FindFirstFileExW`, `FILE_DISPOSITION_INFO_EX` with a classic `DeleteFileW`/`RemoveDirectoryW` fallback, ownership/ACL remediation, Restart Manager for `--kill-locks`, `NetFileEnum`/`NetFileClose` for `--close-remote-locks`) — see [ADR-0007](docs/adr/0007-windows-engine.md). Validated by cross-compilation (`cargo check`/`clippy` for `x86_64-pc-windows-msvc`/`-gnu`) and unit tests for all pure logic; real-filesystem behaviour (junctions, a live second process to terminate, a real file server) still needs validation on an actual Windows machine — see the `TODO(windows-ci)` markers in the crate. |
-| Linux | **Not yet implemented.** `crates/cursdel-linux` currently compiles to an empty stub; native `openat`/`unlinkat`/`statx` support via `libc` is planned. |
+| Linux | **Implemented.** Native `openat`/`unlinkat`/`statx` primitives via `libc` (`statx` for real creation-time reporting where the kernel/filesystem support it, falling back to `fstatat` otherwise), the same `openat`/`unlinkat`-relative TOCTOU mitigation as macOS, and native `/proc/[pid]/fd`-based local lock-holder discovery for `--kill-locks` (no `lsof` subprocess needed, unlike macOS) — see [ADR-0008](docs/adr/0008-linux-engine.md). Validated by cross-compilation (`cargo check`/`clippy` for `x86_64-unknown-linux-gnu`/`aarch64-unknown-linux-gnu`) and unit tests for all pure logic; real-filesystem behaviour (`STATX_BTIME` on a live ext4 volume, the `/proc` lock scan against real concurrent processes) still needs validation on actual Linux hardware — see the `TODO(linux-ci)` markers in the crate. |
 
 `cursdel-core` — the streaming pipeline, adaptive worker controller,
 target-safety validation, filters/retention, and reporting — is fully
@@ -148,8 +147,9 @@ through, including permission remediation and structured JSON output.
 - **`--force`/`--destroy` remediation** — permission/ownership/ACL repair
   attempted only on failure, and only within the authority the executing
   account already has — never a security-model bypass.
-- **Lock handling** — `--kill-locks` for local process locks (macOS today
-  via `lsof`), and a separate, explicitly opt-in, Business/Enterprise-only
+- **Lock handling** — `--kill-locks` for local process locks (macOS via
+  `lsof`, Linux natively via `/proc/[pid]/fd`, Windows via Restart
+  Manager), and a separate, explicitly opt-in, Business/Enterprise-only
   `--close-remote-locks` for supported Windows file servers. See
   [docs/LOCKS.md](docs/LOCKS.md).
 - **Stable machine-readable output** — `--json` with a versioned schema,
@@ -192,9 +192,9 @@ license-verification protocol this implementation targets.
 [README-CurseDelete2.md](README-CurseDelete2.md) is the original
 product/architecture brief this rewrite was built from. It's kept in the
 repository for historical and reference purposes — it describes the
-intended design in full, including some forward-looking sections (Windows/
-Linux engines, packaging, benchmarking) that are still in progress. Where
-the actual implementation refines or deviates from that brief, the
+intended design in full, including some forward-looking sections (packaging
+and distribution, wider benchmark coverage) that are still in progress.
+Where the actual implementation refines or deviates from that brief, the
 [ADRs](docs/adr/README.md) record why; this README and the rest of `docs/`
 describe the product as it actually behaves today.
 

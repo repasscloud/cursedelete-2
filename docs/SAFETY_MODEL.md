@@ -132,8 +132,8 @@ A classic `rm -rf` race: list a directory, then later call a delete
 function on the full path string again. Between the listing and the
 delete, a local attacker with write access to an ancestor directory could
 replace an entry with a symlink, redirecting the delete somewhere the
-operator never intended. CurseDelete's macOS (and, when implemented,
-Linux) engine closes the most dangerous part of this window:
+operator never intended. CurseDelete's macOS and Linux engines close the
+most dangerous part of this window:
 
 1. **Re-open the target's immediate parent directory** with
    `O_DIRECTORY | O_NOFOLLOW`, obtaining a fresh file descriptor.
