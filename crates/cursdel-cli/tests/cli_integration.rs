@@ -542,6 +542,53 @@ fn license_status_reports_community_when_unlicensed() {
         .stdout(predicate::str::contains("Community capabilities"));
 }
 
+/// `cursdel license import` must reject a licence signed by a key outside
+/// the compiled-in trust store rather than blindly accepting any
+/// well-formed signed-looking file. The only real signed fixtures
+/// available (`crates/cursdel-license/tests/fixtures/*.license`) are
+/// signed with a disposable test key generated solely for byte-exact
+/// interop testing (see that crate's fixtures/README.md) -- deliberately
+/// *not* one of the production trust-store keys `cursdel-license` embeds,
+/// so running the real `import` command against one exercises exactly the
+/// "properly signed, but by an untrusted key" rejection path. This is the
+/// one import scenario testable without a real production-signed licence
+/// (see docs/adr/0004-licensing-integration.md's "not yet validated"
+/// note); the success path needs a real activation against a live server.
+#[test]
+fn license_import_rejects_a_license_signed_by_an_untrusted_key() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../cursdel-license/tests/fixtures/test.license");
+    assert!(
+        workspace_root.exists(),
+        "expected fixture at {}",
+        workspace_root.display()
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    cursdel()
+        .arg("license")
+        .arg("import")
+        .arg(&workspace_root)
+        .env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+        .assert()
+        .failure()
+        .code(7)
+        .stderr(predicate::str::contains("verification"));
+}
+
+#[test]
+fn license_import_reports_usage_error_for_missing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    cursdel()
+        .arg("license")
+        .arg("import")
+        .arg(dir.path().join("does-not-exist.license"))
+        .assert()
+        .failure()
+        .code(64);
+}
+
 /// Interrupting a large operation partway through must exit with the
 /// documented Interrupted code (6) and never hang. The tree is sized
 /// generously so the operation cannot plausibly complete in the brief
