@@ -1,12 +1,28 @@
 # Security review
 
 A focused security review was performed against the codebase as of commit
-`06745a4` (core engine, macOS/Windows platform engines, licensing,
-CLI — before the Linux engine and CI workflows landed; both will get an
-equivalent pass once merged, as part of the mandated end-of-work
-repo-wide review). Methodology: an independent identification pass across
-the categories below, followed by adversarial false-positive filtering on
-every candidate finding before anything was accepted or fixed.
+`06745a4` (core engine, macOS/Windows platform engines, licensing, CLI).
+Methodology: an independent identification pass across the categories
+below, followed by adversarial false-positive filtering on every
+candidate finding before anything was accepted or fixed.
+
+**Linux engine addendum**: the Linux platform engine (`crates/cursdel-linux`)
+landed after the pass above and was spot-checked directly against it
+rather than re-run as a full independent pass, since its own module docs
+state explicitly that it "carries exactly the same accepted residual risk
+as `cursdel-macos`, not a weaker or stronger version of it" for the
+TOCTOU mitigation (`ops.rs`) — verified true by reading the actual
+`openat(O_NOFOLLOW)`-then-`unlinkat` implementation, which is structurally
+identical to the macOS one already covered above. `--kill-locks`'s
+`/proc/[pid]/fd`-based lock-holder discovery (`lock.rs`) was also read
+directly: it protects the current process and PIDs 1/2 before terminating
+anything, and treats `/proc/[pid]/fd` read failures (`EACCES` for
+processes this user can't introspect) as expected and skipped rather than
+escalated, matching the "use root privileges only where required"
+principle. No new finding. CI workflows (packaging, release signing) are
+still pending and will get their own pass once merged, since credential/
+supply-chain handling in a release pipeline is a distinct review surface
+from anything covered above.
 
 ## Areas reviewed
 
