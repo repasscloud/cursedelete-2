@@ -410,11 +410,25 @@ fn file_worker_loop(
                     .bytes_deleted
                     .fetch_add(item.size, Ordering::Relaxed);
                 sampler.record_success();
+                // `--verbose` per-file logging. Cheap when disabled by
+                // design: with no subscriber active (or a level filter
+                // excluding `debug`), `tracing`'s macros short-circuit
+                // before formatting or evaluating their arguments, so
+                // this does not cost the normal fast path anything --
+                // see docs/adr/0002-streaming-pipeline.md's performance
+                // principles and `cursdel-cli::main`'s subscriber setup.
+                tracing::debug!(path = %item.path.display(), bytes = item.size, "deleted");
                 false
             }
             DeleteOutcome::Failed(failure) => {
                 metrics.failures.fetch_add(1, Ordering::Relaxed);
                 sampler.record_error();
+                tracing::debug!(
+                    path = %item.path.display(),
+                    category = %failure.category,
+                    message = %failure.message,
+                    "delete failed"
+                );
                 failure_log.push(failure.clone());
                 true
             }
@@ -558,6 +572,7 @@ fn dir_worker_loop(
             match &attempt.outcome {
                 DeleteOutcome::Deleted | DeleteOutcome::AlreadyGone => {
                     metrics.dirs_deleted.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(path = %ready.path.display(), "directory removed");
                     false
                 }
                 DeleteOutcome::Failed(failure)
@@ -570,10 +585,17 @@ fn dir_worker_loop(
                     // could finish and objects were necessarily left
                     // behind as a result.
                     metrics.dirs_retained.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(path = %ready.path.display(), "directory retained (not empty)");
                     true
                 }
                 DeleteOutcome::Failed(failure) => {
                     metrics.failures.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(
+                        path = %ready.path.display(),
+                        category = %failure.category,
+                        message = %failure.message,
+                        "directory removal failed"
+                    );
                     failure_log.push(failure.clone());
                     true
                 }

@@ -46,6 +46,34 @@ fn long_version() -> &'static str {
     )
 }
 
+/// Wires up `tracing` so `--verbose` (and the existing `tracing::debug!`/
+/// `trace!` call sites already present in the platform engines and the
+/// pipeline's per-file logging) actually produce output -- without this,
+/// every one of those calls is silently inert, since `tracing` macros are
+/// no-ops until a subscriber is registered to consume them. Writes to
+/// stderr specifically so it never interleaves with `--json`'s
+/// machine-readable stdout or the normal text report.
+///
+/// Default level is `warn` (routine operation stays quiet, matching "avoid
+/// verbose per-file logging by default" -- verbose logging has a real,
+/// measurable throughput cost on large trees); `--verbose` raises it to
+/// `debug`, which is where the pipeline's per-file delete/failure events
+/// and the Windows engine's privilege-enablement diagnostics live. A
+/// `RUST_LOG` environment variable, if set, always wins over both --
+/// standard `tracing`/`env_logger` convention, useful for a support
+/// request that needs even more (`trace`) or a narrower target filter
+/// than a blanket `--verbose` gives.
+fn init_tracing(verbose: bool) {
+    let default_level = if verbose { "debug" } else { "warn" };
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .try_init();
+}
+
 fn main() {
     // `Cli::parse()` would call clap's own `Error::exit()` on a parse
     // failure, which prints the message correctly but always exits with
@@ -83,6 +111,7 @@ fn main() {
             std::process::exit(code.code());
         }
     };
+    init_tracing(cli.verbose);
     let exit_code = run(cli);
     std::process::exit(exit_code.code());
 }

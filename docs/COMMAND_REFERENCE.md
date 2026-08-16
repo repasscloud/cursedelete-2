@@ -194,9 +194,19 @@ when requested.
 
 ### `--verbose`
 
-Increase diagnostic detail. Per-file verbose logging measurably reduces
-throughput on large trees — it exists for diagnostics, not for routine
-high-volume operation.
+Increase diagnostic detail: raises the diagnostic log level from `warn` to
+`debug`, which surfaces a line per file deleted or failed and per directory
+removed, retained, or failed to remove, plus lower-level platform-engine
+diagnostics (e.g. the Windows engine's privilege-enablement steps).
+Diagnostics are always written to stderr, so they never interleave with
+`--json`'s stdout output or the normal text report on stdout. Per-file
+logging measurably reduces throughput on large trees — it exists for
+diagnostics, not for routine high-volume operation.
+
+The `RUST_LOG` environment variable always overrides `--verbose` when set
+(standard `tracing`/`env_logger` convention — e.g. `RUST_LOG=trace` for even
+more detail, or a narrower target filter such as
+`RUST_LOG=cursdel_windows=debug`).
 
 ### `--log <PATH>`
 
