@@ -3,6 +3,7 @@ mod engine_select;
 mod license_cmd;
 mod output;
 
+use clap::error::ErrorKind;
 use clap::Parser;
 
 use cursdel_core::duration::AgeDuration;
@@ -15,7 +16,36 @@ use cursdel_core::size::ByteSize;
 use args::{Cli, Command};
 
 fn main() {
-    let cli = Cli::parse();
+    // `Cli::parse()` would call clap's own `Error::exit()` on a parse
+    // failure, which prints the message correctly but always exits with
+    // clap's hardcoded usage-error code (2) -- colliding with this
+    // product's own frozen, documented meaning of exit code 2
+    // ("completed with one or more deletion failures", see
+    // `cursdel_core::exit_code::ExitCode`). A script checking
+    // `$? -eq 2` to mean "some files failed to delete" must never be
+    // misled by an unrelated CLI usage error such as an unknown flag or
+    // a missing `license` subcommand, so parse errors are intercepted
+    // here and mapped onto this crate's own `CliUsageError` (64) instead
+    // -- except `--help`/`--version` output, which clap also routes
+    // through the error path but which must still exit 0.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            let _ = e.print();
+            // Only an explicit `--help`/`--version` request is a success;
+            // clap's `DisplayHelpOnMissingArgumentOrSubcommand` also shows
+            // help text but for a genuinely missing required subcommand
+            // (e.g. `cursdel license` with no action) -- treated as a
+            // usage error here for consistency with this crate's own
+            // "no target given" case, which is also `CliUsageError`.
+            let code = if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
+                ExitCode::Success
+            } else {
+                ExitCode::CliUsageError
+            };
+            std::process::exit(code.code());
+        }
+    };
     let exit_code = run(cli);
     std::process::exit(exit_code.code());
 }

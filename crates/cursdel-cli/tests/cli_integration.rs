@@ -174,6 +174,39 @@ fn exit_code_is_usage_error_when_target_missing() {
     cursdel().assert().failure().code(64);
 }
 
+/// clap's own parse-error handling defaults to exit code 2 for any usage
+/// error, which would collide with this product's own frozen, documented
+/// meaning of exit code 2 ("completed with one or more deletion
+/// failures"). A script checking `$? -eq 2` to mean "some files failed to
+/// delete" must never be misled by an unrelated CLI usage error --
+/// regression coverage for every clap-level error path, not just this
+/// crate's own "no target given" case above.
+#[test]
+fn clap_level_usage_errors_use_cli_usage_error_code_not_claps_default() {
+    cursdel()
+        .arg("--this-flag-does-not-exist")
+        .assert()
+        .failure()
+        .code(64);
+}
+
+#[test]
+fn missing_required_license_subcommand_is_a_usage_error_not_success() {
+    // `cursdel license` with no action given is, in this product's own
+    // design, exactly as much a usage error as bare `cursdel` with no
+    // target -- both must be treated consistently, even though clap
+    // itself classifies a missing-subcommand error as "display help"
+    // (which would otherwise map to exit 0).
+    cursdel().arg("license").assert().failure().code(64);
+}
+
+#[test]
+fn help_and_version_exit_zero_despite_using_claps_error_path() {
+    cursdel().arg("--help").assert().success();
+    cursdel().arg("--version").assert().success();
+    cursdel().args(["license", "--help"]).assert().success();
+}
+
 #[test]
 fn include_and_exclude_filters_are_respected() {
     let dir = tempfile::tempdir().unwrap();
