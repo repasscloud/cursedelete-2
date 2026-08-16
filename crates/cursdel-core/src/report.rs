@@ -41,6 +41,14 @@ pub struct Summary {
 }
 
 impl Summary {
+    /// Classification is based on the (possibly truncated, see
+    /// `failures_truncated`) sample of failures actually retained. In the
+    /// pathological case of more than `MAX_STORED_FAILURES` failures whose
+    /// categories are not uniform across the run, the most specific exit
+    /// code (remote/local lock, privilege) could be missed in favour of
+    /// the generic [`ExitCode::CompletedWithFailures`] -- accepted as a
+    /// rare edge case of an already-rare failure storm; the failure
+    /// *count* itself is never approximate.
     pub fn exit_code(&self) -> ExitCode {
         if self.interrupted {
             return ExitCode::Interrupted;
@@ -62,6 +70,21 @@ impl Summary {
                 .any(|f| f.category == crate::error::FailureCategory::LocalLockUnresolved);
             if any_local_lock_failure && self.kill_locks_enabled {
                 return ExitCode::LockResolutionFailed;
+            }
+            // Remediation was explicitly requested (--force/--destroy),
+            // attempted at least once, and never once succeeded: the most
+            // likely explanation is that the executing security context
+            // simply doesn't hold the privilege remediation would need,
+            // not that individual objects happened to fail for unrelated
+            // reasons. Distinct from the general CompletedWithFailures
+            // case so automation can tell "we don't have permission to
+            // fix this at all" apart from "most things worked, a few
+            // objects failed."
+            if self.acl_repair_enabled
+                && self.metrics.remediation_attempts > 0
+                && self.metrics.remediation_successes == 0
+            {
+                return ExitCode::PrivilegeRequirementNotSatisfied;
             }
             return ExitCode::CompletedWithFailures;
         }
@@ -387,6 +410,38 @@ mod tests {
             os_error_code: None,
         });
         assert_eq!(s.exit_code(), ExitCode::LockResolutionFailed);
+    }
+
+    #[test]
+    fn exit_code_privilege_requirement_not_satisfied() {
+        let mut s = base_summary();
+        s.acl_repair_enabled = true;
+        s.metrics.remediation_attempts = 3;
+        s.metrics.remediation_successes = 0;
+        s.failures.push(DeleteFailure {
+            path: PathBuf::from("/tmp/x/f"),
+            is_directory: false,
+            category: crate::error::FailureCategory::AccessDenied,
+            message: "denied".to_string(),
+            os_error_code: None,
+        });
+        assert_eq!(s.exit_code(), ExitCode::PrivilegeRequirementNotSatisfied);
+    }
+
+    #[test]
+    fn exit_code_partial_remediation_success_is_generic_failure_not_privilege() {
+        let mut s = base_summary();
+        s.acl_repair_enabled = true;
+        s.metrics.remediation_attempts = 3;
+        s.metrics.remediation_successes = 2; // at least one worked
+        s.failures.push(DeleteFailure {
+            path: PathBuf::from("/tmp/x/f"),
+            is_directory: false,
+            category: crate::error::FailureCategory::AccessDenied,
+            message: "denied".to_string(),
+            os_error_code: None,
+        });
+        assert_eq!(s.exit_code(), ExitCode::CompletedWithFailures);
     }
 
     #[test]

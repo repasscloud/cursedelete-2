@@ -308,6 +308,7 @@ dependencies = [
  "cursdel-macos",
  "cursdel-policy",
  "cursdel-windows",
+ "libc",
  "predicates",
  "serde_json",
  "tempfile",

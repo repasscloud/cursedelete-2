@@ -165,6 +165,7 @@ pub fn run(
             let failure_log = &failure_log;
             let root_done_tx = root_done_tx.clone();
             let dir_workers_done = dir_workers_done.clone();
+            let cancel = cancel.clone();
             scope.spawn(move || {
                 dir_worker_loop(
                     engine,
@@ -175,6 +176,7 @@ pub fn run(
                     delete_opts,
                     dry_run,
                     preserve_root,
+                    &cancel,
                     &root_done_tx,
                     &dir_workers_done,
                 );
@@ -504,6 +506,7 @@ fn dir_worker_loop(
     delete_opts: DeleteOptions,
     dry_run: bool,
     preserve_root: bool,
+    cancel: &CancelToken,
     root_done_tx: &Sender<()>,
     shutdown: &AtomicBool,
 ) {
@@ -542,11 +545,14 @@ fn dir_worker_loop(
                     false
                 }
                 DeleteOutcome::Failed(failure)
-                    if failure.category == FailureCategory::NotEmpty && preserve_root =>
+                    if failure.category == FailureCategory::NotEmpty
+                        && (preserve_root || cancel.is_cancelled()) =>
                 {
-                    // Expected under retention/filtering: some children
-                    // were deliberately retained, so this is not an
-                    // operational failure.
+                    // Expected, not an operational failure: either
+                    // retention/filtering deliberately left children
+                    // behind, or the operation was interrupted before it
+                    // could finish and objects were necessarily left
+                    // behind as a result.
                     metrics.dirs_retained.fetch_add(1, Ordering::Relaxed);
                     true
                 }
