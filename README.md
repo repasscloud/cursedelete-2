@@ -197,3 +197,22 @@ Linux engines, packaging, benchmarking) that are still in progress. Where
 the actual implementation refines or deviates from that brief, the
 [ADRs](docs/adr/README.md) record why; this README and the rest of `docs/`
 describe the product as it actually behaves today.
+
+## About `_old/`
+
+[`_old/`](_old/) contains the two previous CurseDelete implementations
+(a cross-platform C# CLI, and `sfvdd`, a Windows-only Rust prototype) that
+predate this Rust rewrite. They are kept as **reference material only** —
+deliberately not part of the Cargo workspace (the workspace `Cargo.toml`
+does not list them as members, and CI does not build or test them) — and
+were consulted directly while implementing the new engines: the C#
+implementation's producer/consumer queue shape informed the streaming
+pipeline design (see [ADR-0002](docs/adr/0002-streaming-pipeline.md)), and
+`sfvdd`'s Win32 API usage (`FindFirstFileExW`, `FILE_DISPOSITION_INFO_EX`,
+ownership/ACL remediation) informed the Windows engine (see
+[ADR-0007](docs/adr/0007-windows-engine.md)) — while also demonstrating an
+anti-pattern the new architecture specifically avoids: `sfvdd`'s "fast"
+path collects an entire tree into memory before deleting anything, exactly
+the unbounded-memory behaviour the new streaming pipeline exists to
+prevent. Do not build against `_old/` or treat it as part of the current
+product.
