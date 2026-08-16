@@ -245,6 +245,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn fixture(name: &str) -> String {
         std::fs::read_to_string(format!(
@@ -347,6 +348,114 @@ mod tests {
         };
         let result = validate_product(&verified, "cursedelete", None, None, None);
         assert!(result.is_err());
+    }
+
+    fn license_with_activation(mode: &str, lease_expires_at: Option<&str>) -> Value {
+        let license_json = fixture("test.license");
+        let mut value: Value = serde_json::from_str(&license_json).unwrap();
+        value["license"]["deviceBinding"] = json!({
+            "scheme": "os-machine-id-sha256-v1",
+            "deviceId": "A".repeat(64),
+            "deviceName": "original-device",
+        });
+        let mut activation = serde_json::Map::new();
+        activation.insert("activationId".to_string(), json!("act-1"));
+        activation.insert("mode".to_string(), json!(mode));
+        activation.insert("activatedAt".to_string(), json!("2026-01-01T00:00:00Z"));
+        if mode == "online" {
+            activation.insert("refreshAfter".to_string(), json!("2026-01-02T00:00:00Z"));
+            activation.insert(
+                "leaseExpiresAt".to_string(),
+                json!(lease_expires_at.unwrap_or("2026-01-08T00:00:00Z")),
+            );
+        }
+        value["license"]["activation"] = Value::Object(activation);
+        value
+    }
+
+    fn verified_from(value: &Value) -> VerifiedLicense {
+        let license_obj = value["license"].as_object().unwrap().clone();
+        let data = schema::parse(&Value::Object(license_obj)).unwrap();
+        VerifiedLicense {
+            key_id: "test2026".to_string(),
+            data,
+        }
+    }
+
+    #[test]
+    fn validate_activation_rejects_a_different_device() {
+        let value = license_with_activation("offline", None);
+        let verified = verified_from(&value);
+
+        let other_device = LocalDeviceIdentity {
+            scheme: "os-machine-id-sha256-v1",
+            device_id: "B".repeat(64),
+            device_name: "someone-elses-laptop".to_string(),
+            source: "test",
+        };
+
+        let result = validate_activation(&verified, Some(&other_device), None);
+        let err = result.expect_err("a license bound to a different device must be rejected");
+        assert!(
+            err.to_string().contains("different device"),
+            "error should explain the device mismatch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_activation_accepts_the_matching_device() {
+        let value = license_with_activation("offline", None);
+        let verified = verified_from(&value);
+
+        let matching_device = LocalDeviceIdentity {
+            scheme: "os-machine-id-sha256-v1",
+            device_id: "A".repeat(64),
+            device_name: "original-device".to_string(),
+            source: "test",
+        };
+
+        assert!(validate_activation(&verified, Some(&matching_device), None).is_ok());
+    }
+
+    #[test]
+    fn validate_activation_rejects_an_expired_online_lease() {
+        let value = license_with_activation("online", Some("2026-01-08T00:00:00Z"));
+        let verified = verified_from(&value);
+
+        let matching_device = LocalDeviceIdentity {
+            scheme: "os-machine-id-sha256-v1",
+            device_id: "A".repeat(64),
+            device_name: "original-device".to_string(),
+            source: "test",
+        };
+
+        // "Now" is after the lease expiry.
+        let now = time::macros::datetime!(2026-02-01 0:00 UTC);
+        let result = validate_activation(&verified, Some(&matching_device), Some(now));
+        let err = result.expect_err("an expired activation lease must be rejected");
+        assert!(
+            err.to_string().contains("lease expired"),
+            "error should explain the lease expired, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_activation_accepts_offline_mode_with_no_lease_to_expire() {
+        // Offline activations have no refreshAfter/leaseExpiresAt at all
+        // (LICENSING-INTEGRATION.md §2.3: "this produces an activation
+        // with no lease ... so it never needs to phone home again"), so
+        // it must remain valid indefinitely regardless of how far in the
+        // future "now" is.
+        let value = license_with_activation("offline", None);
+        let verified = verified_from(&value);
+        let matching_device = LocalDeviceIdentity {
+            scheme: "os-machine-id-sha256-v1",
+            device_id: "A".repeat(64),
+            device_name: "original-device".to_string(),
+            source: "test",
+        };
+        let far_future = time::macros::datetime!(2099-01-01 0:00 UTC);
+        assert!(validate_activation(&verified, Some(&matching_device), Some(far_future)).is_ok());
     }
 
     #[test]
