@@ -458,28 +458,49 @@ fn is_remediable(category: FailureCategory) -> bool {
     )
 }
 
+/// Run a single native delete, applying `--force`/`--destroy` ACL/ownership
+/// remediation and retrying once if the failure category is remediable.
+/// Shared by both the file-worker path (`process_one`) and the directory-
+/// worker path (`dir_worker_loop`): an empty directory that cannot be
+/// removed because of parent permissions or a restrictive ACL needs the
+/// exact same repair-and-retry as a file does, and no file operation
+/// necessarily happens first to repair permissions incidentally (e.g. an
+/// empty protected target).
+fn delete_with_remediation(
+    engine: &dyn PlatformEngine,
+    path: &Path,
+    dispatch_as_dir: bool,
+    opts: DeleteOptions,
+    metrics: &OperationMetrics,
+) -> crate::engine::DeleteAttempt {
+    let mut attempt = base_delete(engine, path, dispatch_as_dir, opts);
+
+    if let DeleteOutcome::Failed(ref failure) = attempt.outcome {
+        if opts.allow_remediation && is_remediable(failure.category) {
+            metrics.remediation_attempts.fetch_add(1, Ordering::Relaxed);
+            if let RemediationOutcome::Applied =
+                engine.remediate(path, dispatch_as_dir, failure, opts)
+            {
+                metrics
+                    .remediation_successes
+                    .fetch_add(1, Ordering::Relaxed);
+                metrics.retries.fetch_add(1, Ordering::Relaxed);
+                attempt = base_delete(engine, path, dispatch_as_dir, opts);
+            }
+        }
+    }
+
+    attempt
+}
+
 fn process_one(
     engine: &dyn PlatformEngine,
     item: &FileWorkItem,
     opts: DeleteOptions,
     metrics: &OperationMetrics,
 ) -> crate::engine::DeleteAttempt {
-    let mut attempt = base_delete(engine, &item.path, item.dispatch_as_dir, opts);
-
-    if let DeleteOutcome::Failed(ref failure) = attempt.outcome {
-        if opts.allow_remediation && is_remediable(failure.category) {
-            metrics.remediation_attempts.fetch_add(1, Ordering::Relaxed);
-            if let RemediationOutcome::Applied =
-                engine.remediate(&item.path, item.dispatch_as_dir, failure, opts)
-            {
-                metrics
-                    .remediation_successes
-                    .fetch_add(1, Ordering::Relaxed);
-                metrics.retries.fetch_add(1, Ordering::Relaxed);
-                attempt = base_delete(engine, &item.path, item.dispatch_as_dir, opts);
-            }
-        }
-    }
+    let mut attempt =
+        delete_with_remediation(engine, &item.path, item.dispatch_as_dir, opts, metrics);
 
     if let DeleteOutcome::Failed(ref failure) = attempt.outcome {
         if failure.category == FailureCategory::SharingViolation && opts.kill_locks {
@@ -568,7 +589,7 @@ fn dir_worker_loop(
             }
             ready.simulated_non_empty
         } else {
-            let attempt = engine.delete_dir(&ready.path, delete_opts);
+            let attempt = delete_with_remediation(engine, &ready.path, true, delete_opts, metrics);
             match &attempt.outcome {
                 DeleteOutcome::Deleted | DeleteOutcome::AlreadyGone => {
                     metrics.dirs_deleted.fetch_add(1, Ordering::Relaxed);
