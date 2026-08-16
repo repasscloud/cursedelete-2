@@ -1,0 +1,290 @@
+name: Release
+
+# Builds and publishes CurseDelete 2 release binaries for all six shipping
+# targets (Windows x64/ARM64, Linux x64/ARM64, macOS Apple Silicon/Intel)
+# whenever a `v*` tag is pushed. See docs/RELEASE.md for the full release
+# process, what this workflow does and does not cover, and follow-up work
+# (real code-signing credentials, WinGet, Homebrew/apt/rpm, MSI packaging).
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+permissions:
+  contents: write # required to create the GitHub Release and upload assets
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Fails loudly if someone tags a release without bumping
+  # [workspace.package].version in Cargo.toml first, instead of silently
+  # shipping mismatched version metadata.
+  check-version:
+    name: Verify tag matches workspace version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Derive and verify version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
+          echo "Tag: ${tag} -> version ${version}"
+          echo "Cargo.toml [workspace.package].version: ${cargo_version}"
+          if [ "${version}" != "${cargo_version}" ]; then
+            echo "::error::Tag ${tag} implies version ${version}, but Cargo.toml's [workspace.package].version is ${cargo_version}. Bump Cargo.toml and re-tag."
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+  build-windows:
+    name: build (${{ matrix.target }})
+    needs: check-version
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # aarch64-pc-windows-msvc is a genuine cross-compile from the x64
+      # windows-latest host, using the ARM64 MSVC cross tools that ship as
+      # part of the runner's Visual Studio install (no `cross`/Docker
+      # needed for a Windows target -- that only works for Linux targets).
+      # This has a documented history of gaps on some runner-image
+      # revisions (actions/runner-images#5056, and currently open as of
+      # this writing: actions/runner-images#14215 on the newer Windows
+      # Server 2025/VS2026 image). If this step fails specifically on the
+      # ARM64 leg with a missing linker/cl.exe for ARM64, that's an
+      # upstream GitHub Actions runner-image gap, not this repo's code --
+      # see docs/RELEASE.md for the documented fallback.
+      - name: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }} -p cursdel-cli
+
+      # --- Windows Authenticode code signing: NOT YET CONFIGURED ---
+      # Inert today: WINDOWS_CERTIFICATE is not set as a repo secret, so
+      # this step's `if` is false and it never runs. It exists so that
+      # if a certificate secret is added later WITHOUT also implementing
+      # the real signtool.exe invocation, the build fails loudly instead
+      # of silently shipping an unsigned binary under a signing secret
+      # that looks configured. See docs/RELEASE.md "Follow-up work" for
+      # exactly what's needed (WINDOWS_CERTIFICATE: base64-encoded .pfx,
+      # WINDOWS_CERTIFICATE_PASSWORD) and where signtool.exe invocation
+      # would go (signtool.exe ships with the Windows SDK already present
+      # on windows-latest runners).
+      - name: Authenticode sign (placeholder -- inactive until secrets exist)
+        if: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+        shell: bash
+        run: |
+          echo "::error::WINDOWS_CERTIFICATE is set but Authenticode signing is not implemented in this workflow yet. Implement the signtool.exe invocation here (see docs/RELEASE.md) before relying on this secret, or unset it."
+          exit 1
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $Version = "${{ needs['check-version'].outputs.version }}"
+          $Target = "${{ matrix.target }}"
+          $Stage = "cursdel-$Version-$Target"
+          New-Item -ItemType Directory -Force -Path "dist/$Stage" | Out-Null
+          Copy-Item "target/$Target/release/cursdel.exe" "dist/$Stage/"
+          Copy-Item "LICENSE" "dist/$Stage/"
+          Copy-Item "README.md" "dist/$Stage/README.md"
+          Compress-Archive -Path "dist/$Stage/*" -DestinationPath "dist/$Stage.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cursdel-${{ needs['check-version'].outputs.version }}-${{ matrix.target }}
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  build-linux:
+    name: build (${{ matrix.target }})
+    needs: check-version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: cargo build --release (native x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo build --release --locked --target ${{ matrix.target }} -p cursdel-cli
+
+      # aarch64-unknown-linux-gnu: built with `cross` (cross-rs), not a
+      # manually apt-installed cross toolchain. `cross` runs the build
+      # inside a pre-built Docker image with a matched aarch64-linux-gnu C
+      # toolchain and glibc sysroot already configured, which matters here
+      # because `ring` (transitively, via ureq's TLS backend in
+      # cursdel-license) compiles C/assembly in its build.rs -- a mismatched
+      # sysroot from a hand-rolled `apt-get install gcc-aarch64-linux-gnu`
+      # setup can produce a binary that links fine but misbehaves against
+      # the actual glibc on real ARM64 Linux hardware. (ci.yml's
+      # cross-check job uses the lighter apt-based approach instead,
+      # because it only needs `cargo check` -- a type-check, not a binary
+      # meant to ship.)
+      - name: Install cross
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: cross build --release --target aarch64-unknown-linux-gnu
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: cross build --release --locked --target ${{ matrix.target }} -p cursdel-cli
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs['check-version'].outputs.version }}"
+          target="${{ matrix.target }}"
+          stage="cursdel-${version}-${target}"
+          mkdir -p "dist/${stage}"
+          cp "target/${target}/release/cursdel" "dist/${stage}/"
+          cp LICENSE "dist/${stage}/"
+          cp README.md "dist/${stage}/README.md"
+          tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cursdel-${{ needs['check-version'].outputs.version }}-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  build-macos:
+    name: build (${{ matrix.target }})
+    needs: check-version
+    runs-on: macos-latest # Apple Silicon (aarch64-apple-darwin native host)
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # x86_64-apple-darwin cross-compiles cleanly from the Apple Silicon
+      # host using Xcode's clang (multi-arch by default); no extra
+      # toolchain/cross tool needed for either leg.
+      - name: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }} -p cursdel-cli
+
+      # --- macOS codesigning / notarization: NOT YET CONFIGURED ---
+      # Inert today: APPLE_CERTIFICATE is not set as a repo secret, so this
+      # step's `if` is false and it never runs -- same fail-loud-if-half-
+      # configured rationale as the Windows signing placeholder above. See
+      # docs/RELEASE.md "Follow-up work" for the full secret list this
+      # would need (APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD,
+      # APPLE_TEAM_ID, APPLE_ID, APPLE_APP_PASSWORD) and where the
+      # `codesign` + `xcrun notarytool` invocations would go.
+      - name: Codesign & notarize (placeholder -- inactive until secrets exist)
+        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        shell: bash
+        run: |
+          echo "::error::APPLE_CERTIFICATE is set but codesigning/notarization is not implemented in this workflow yet. Implement the codesign/notarytool invocation here (see docs/RELEASE.md) before relying on this secret, or unset it."
+          exit 1
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs['check-version'].outputs.version }}"
+          target="${{ matrix.target }}"
+          stage="cursdel-${version}-${target}"
+          mkdir -p "dist/${stage}"
+          cp "target/${target}/release/cursdel" "dist/${stage}/"
+          cp LICENSE "dist/${stage}/"
+          cp README.md "dist/${stage}/README.md"
+          tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cursdel-${{ needs['check-version'].outputs.version }}-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: [check-version, build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # CHANGELOG.md follows Keep a Changelog: "## [X.Y.Z] - YYYY-MM-DD" headings, one
+      # section per release. Pulling the section for this tag's version out now, before
+      # the GitHub Release is published, means a missing changelog entry fails loudly
+      # instead of shipping a release with no matching notes.
+      - name: Extract changelog section for this release
+        env:
+          VERSION: ${{ needs['check-version'].outputs.version }}
+        run: |
+          set -euo pipefail
+          awk -v ver="$VERSION" '
+            /^## \[/ {
+              if (found) exit
+              if ($0 == "## [" ver "]" || index($0, "## [" ver "] - ") == 1) { found = 1; next }
+              next
+            }
+            # Stop before the trailing "[label]: url" reference-link block at the end of
+            # the file, in case this version is ever the last section.
+            found && /^\[.*\]: / { exit }
+            found && !started && /^[[:space:]]*$/ { next } # drop the blank line right after the heading
+            found { started = 1; print }
+          ' CHANGELOG.md > release-notes.md
+
+          if [ ! -s release-notes.md ]; then
+            echo "::error::No '## [$VERSION]' section found in CHANGELOG.md for tag ${GITHUB_REF_NAME}. Add a dated changelog section for this version before tagging."
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts
+          ls -la
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: artifacts/*
+          fail_on_unmatched_files: true
+          body_path: release-notes.md

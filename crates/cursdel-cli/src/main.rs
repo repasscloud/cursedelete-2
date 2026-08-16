@@ -1,0 +1,251 @@
+mod args;
+mod engine_select;
+mod license_cmd;
+mod output;
+
+use clap::error::ErrorKind;
+use clap::{CommandFactory, FromArgMatches};
+
+use cursdel_core::duration::AgeDuration;
+use cursdel_core::engine::CancelToken;
+use cursdel_core::exit_code::ExitCode;
+use cursdel_core::filter::{AgeBasis, FilterSet, FilterSpec};
+use cursdel_core::options::{Mode, OperationOptions, WorkerPolicy};
+use cursdel_core::size::ByteSize;
+
+use args::{Cli, Command};
+
+/// `cursdel --version` (short `-V`) stays the bare semver clap derives by
+/// default (scriptable, stable); `cursdel --version`'s *long* form and
+/// `cursdel license status`-adjacent support requests benefit from more --
+/// build profile and the actual OS/architecture this binary is running as,
+/// exactly the kind of detail a support request needs and that the
+/// previous C# implementation's own `-version`/`-vinfo` output included
+/// (OS name, 64-bit-ness, runtime version, machine/user). `std::env::consts`
+/// reports the *running* binary's target, which is what actually matters
+/// here (not the build host's), and needs no build.rs.
+fn long_version() -> &'static str {
+    // `Command::long_version` wants a `&'static str`, but the content is
+    // only known at runtime (the *running* binary's OS/arch, not
+    // necessarily the build host's). Leaking is fine here: this runs
+    // exactly once per process, for a string that needs to live for the
+    // rest of the process anyway.
+    Box::leak(
+        format!(
+            "{}\nbuild:    {} ({}-{})",
+            env!("CARGO_PKG_VERSION"),
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            },
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+        )
+        .into_boxed_str(),
+    )
+}
+
+/// Wires up `tracing` so `--verbose` (and the existing `tracing::debug!`/
+/// `trace!` call sites already present in the platform engines and the
+/// pipeline's per-file logging) actually produce output -- without this,
+/// every one of those calls is silently inert, since `tracing` macros are
+/// no-ops until a subscriber is registered to consume them. Writes to
+/// stderr specifically so it never interleaves with `--json`'s
+/// machine-readable stdout or the normal text report.
+///
+/// Default level is `warn` (routine operation stays quiet, matching "avoid
+/// verbose per-file logging by default" -- verbose logging has a real,
+/// measurable throughput cost on large trees); `--verbose` raises it to
+/// `debug`, which is where the pipeline's per-file delete/failure events
+/// and the Windows engine's privilege-enablement diagnostics live. A
+/// `RUST_LOG` environment variable, if set, always wins over both --
+/// standard `tracing`/`env_logger` convention, useful for a support
+/// request that needs even more (`trace`) or a narrower target filter
+/// than a blanket `--verbose` gives.
+fn init_tracing(verbose: bool) {
+    let default_level = if verbose { "debug" } else { "warn" };
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .try_init();
+}
+
+fn main() {
+    // `Cli::parse()` would call clap's own `Error::exit()` on a parse
+    // failure, which prints the message correctly but always exits with
+    // clap's hardcoded usage-error code (2) -- colliding with this
+    // product's own frozen, documented meaning of exit code 2
+    // ("completed with one or more deletion failures", see
+    // `cursdel_core::exit_code::ExitCode`). A script checking
+    // `$? -eq 2` to mean "some files failed to delete" must never be
+    // misled by an unrelated CLI usage error such as an unknown flag or
+    // a missing `license` subcommand, so parse errors are intercepted
+    // here and mapped onto this crate's own `CliUsageError` (64) instead
+    // -- except `--help`/`--version` output, which clap also routes
+    // through the error path but which must still exit 0. Building the
+    // `Command` manually (rather than `Cli::parse()`/`Cli::try_parse()`)
+    // is what allows attaching `long_version` above.
+    let command = Cli::command().long_version(long_version());
+    let cli = match command
+        .try_get_matches()
+        .and_then(|matches| Cli::from_arg_matches(&matches))
+    {
+        Ok(cli) => cli,
+        Err(e) => {
+            let _ = e.print();
+            // Only an explicit `--help`/`--version` request is a success;
+            // clap's `DisplayHelpOnMissingArgumentOrSubcommand` also shows
+            // help text but for a genuinely missing required subcommand
+            // (e.g. `cursdel license` with no action) -- treated as a
+            // usage error here for consistency with this crate's own
+            // "no target given" case, which is also `CliUsageError`.
+            let code = if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
+                ExitCode::Success
+            } else {
+                ExitCode::CliUsageError
+            };
+            std::process::exit(code.code());
+        }
+    };
+    init_tracing(cli.verbose);
+    let exit_code = run(cli);
+    std::process::exit(exit_code.code());
+}
+
+fn run(cli: Cli) -> ExitCode {
+    match cli.command {
+        Some(Command::License { action }) => license_cmd::run(action),
+        None => run_delete(cli),
+    }
+}
+
+fn run_delete(cli: Cli) -> ExitCode {
+    let Some(target) = cli.target.clone() else {
+        eprintln!("Error: a target path is required.\n\nUsage: cursdel <path> [options]\nRun 'cursdel --help' for details.");
+        return ExitCode::CliUsageError;
+    };
+
+    let mode = if cli.destroy {
+        Mode::Destroy
+    } else if cli.force {
+        Mode::Force
+    } else {
+        Mode::Normal
+    };
+
+    let workers = match cli.workers.parse::<WorkerPolicy>() {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return ExitCode::CliUsageError;
+        }
+    };
+
+    let age = match cli.age.as_deref().map(str::parse::<AgeDuration>) {
+        Some(Ok(d)) => Some(d.as_duration()),
+        Some(Err(e)) => {
+            eprintln!("Error: {e}");
+            return ExitCode::CliUsageError;
+        }
+        None => None,
+    };
+
+    let age_basis = match cli.age_by.parse::<AgeBasis>() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return ExitCode::CliUsageError;
+        }
+    };
+
+    let min_size = match cli.min_size.as_deref().map(str::parse::<ByteSize>) {
+        Some(Ok(v)) => Some(v),
+        Some(Err(e)) => {
+            eprintln!("Error: --min-size: {e}");
+            return ExitCode::CliUsageError;
+        }
+        None => None,
+    };
+
+    let max_size = match cli.max_size.as_deref().map(str::parse::<ByteSize>) {
+        Some(Ok(v)) => Some(v),
+        Some(Err(e)) => {
+            eprintln!("Error: --max-size: {e}");
+            return ExitCode::CliUsageError;
+        }
+        None => None,
+    };
+
+    if cli.close_remote_locks {
+        let capabilities = license_cmd::current_capabilities();
+        if !capabilities.close_remote_locks {
+            eprintln!(
+                "Error: --close-remote-locks requires a Business or Enterprise licence.\n\
+                 Run 'cursdel license status' for details, or 'cursdel license activate' to activate one."
+            );
+            return ExitCode::LicenseRequired;
+        }
+    }
+
+    let filter_spec = FilterSpec {
+        include: cli.include.clone(),
+        exclude: cli.exclude.clone(),
+        min_size,
+        max_size,
+        age,
+        age_basis,
+    };
+
+    let filters = match FilterSet::build(&filter_spec) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return ExitCode::CliUsageError;
+        }
+    };
+
+    let options = OperationOptions {
+        target,
+        mode,
+        workers,
+        dry_run: cli.dry_run,
+        kill_locks: cli.kill_locks,
+        close_remote_locks: cli.close_remote_locks,
+        filters: filter_spec,
+        json: cli.json,
+        quiet: cli.quiet,
+        verbose: cli.verbose,
+        log_path: cli.log.clone(),
+    };
+
+    let cancel = CancelToken::new();
+    {
+        let cancel_for_handler = cancel.clone();
+        // Best-effort: if a handler can't be installed (e.g. already one
+        // set in an unusual embedding scenario), CurseDelete still runs
+        // to completion normally, it just won't respond to Ctrl+C early.
+        let _ = ctrlc::set_handler(move || cancel_for_handler.cancel());
+    }
+
+    let engine = engine_select::make_engine();
+    let summary = match cursdel_core::pipeline::run(engine.as_ref(), &options, &filters, cancel) {
+        Ok(summary) => summary,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return ExitCode::InvalidArgsOrTarget;
+        }
+    };
+
+    let exit_code = summary.exit_code();
+    output::render(
+        &summary,
+        options.json,
+        options.quiet,
+        options.log_path.as_deref(),
+    );
+    exit_code
+}

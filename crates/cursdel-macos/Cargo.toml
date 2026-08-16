@@ -1,0 +1,18 @@
+[package]
+name = "cursdel-macos"
+description = "Native macOS deletion engine (Darwin/POSIX primitives, APFS-aware, macOS ACL/xattr handling)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cursdel-core = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
