@@ -15,7 +15,7 @@ version = "2.0.0"
 edition = "2021"
 rust-version = "1.82"
 authors = ["RePassCloud"]
-license = "LicenseRef-CurseDelete-Commercial OR MIT"
+license = "Apache-2.0"
 repository = "https://github.com/danijeljw-RPC/cursedelete-2"
 homepage = "https://github.com/danijeljw-RPC/cursedelete-2"
 
