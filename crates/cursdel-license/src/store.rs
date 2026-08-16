@@ -128,13 +128,24 @@ fn write_restrictive(path: &Path, bytes: &[u8]) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .mode(0o600)
             .open(path)?;
+        // `OpenOptionsExt::mode` only affects the mode passed to open(2)'s
+        // O_CREAT, which the kernel applies solely when this call actually
+        // creates the file -- if `path` already existed (e.g. left behind
+        // with looser permissions by an older version, a backup/restore
+        // tool that doesn't preserve mode bits, or a manual copy), the
+        // `mode(0o600)` above is silently ignored and whatever permissions
+        // it already had persist across this rewrite. Re-assert 0600
+        // explicitly and unconditionally so a secret this file holds
+        // (the activation bearer token) is never left readable by other
+        // local accounts regardless of the file's prior state.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         file.write_all(bytes)
     }
 
@@ -218,6 +229,52 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    /// Regression test for a real gap found in security review: POSIX's
+    /// `open(..., O_CREAT, mode)` only applies `mode` when it actually
+    /// creates the file. Writing to a file that already exists with looser
+    /// permissions (left behind by an older version, a backup/restore
+    /// tool, or a manual copy) must not silently leave those permissions
+    /// in place on a file holding a bearer credential.
+    #[cfg(unix)]
+    #[test]
+    fn activation_credentials_permissions_are_restored_on_a_preexisting_loose_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = LicensePaths {
+            license_file: dir.path().join("license.json"),
+            activation_credentials_file: dir.path().join("activation.json"),
+        };
+
+        // Simulate a pre-existing file with world-readable permissions,
+        // as if left behind by an older version or a backup/restore tool.
+        std::fs::write(&paths.activation_credentials_file, b"stale").unwrap();
+        std::fs::set_permissions(
+            &paths.activation_credentials_file,
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+
+        save_activation_credentials(
+            &paths,
+            &ActivationCredentials {
+                activation_id: "a".to_string(),
+                activation_token: "top-secret".to_string(),
+                mode: "online".to_string(),
+            },
+        )
+        .unwrap();
+
+        let mode = std::fs::metadata(&paths.activation_credentials_file)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "permissions must be reasserted even when the file already existed"
+        );
     }
 
     #[test]
