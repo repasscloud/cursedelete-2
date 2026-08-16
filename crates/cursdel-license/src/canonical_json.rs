@@ -150,12 +150,6 @@ mod tests {
     #[test]
     fn html_sensitive_characters_are_escaped() {
         let value = json!("<a href='x'>A&B `C` +D+</a>");
-        let expected = br#""<a href='x'>A&B `C` +D+</a>""#;
-        // NOTE: '=' and backtick/plus need per-char verification below;
-        // this inline expectation is intentionally re-derived character by
-        // character in the exhaustive fixture test instead of trusted by
-        // eye here.
-        let _ = expected;
         let bytes = canonicalize(&value);
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.contains("\\u003C")); // <

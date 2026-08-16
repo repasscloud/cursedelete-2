@@ -198,8 +198,19 @@ fn deactivate() -> ExitCode {
         &device.device_id,
     ) {
         Ok(_) => {
-            let _ = store::remove_activation_credentials(&paths);
-            let _ = store::remove_license_file(&paths);
+            // The server-side deactivation already succeeded at this
+            // point, which is the state that actually matters (the seat
+            // is freed for reactivation elsewhere); local cleanup is
+            // best-effort but its failure is still worth telling the
+            // operator about rather than silently leaving stale local
+            // files that could otherwise look like this device is still
+            // activated.
+            if let Err(e) = store::remove_activation_credentials(&paths) {
+                eprintln!("Warning: could not remove local activation credentials: {e}");
+            }
+            if let Err(e) = store::remove_license_file(&paths) {
+                eprintln!("Warning: could not remove local license file: {e}");
+            }
             println!("License deactivated on this device.");
             ExitCode::Success
         }
