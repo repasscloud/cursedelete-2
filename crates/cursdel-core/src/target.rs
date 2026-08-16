@@ -265,7 +265,17 @@ pub fn validate_target(path: &Path) -> Result<CanonicalTarget, TargetError> {
     let absolute_path = PathBuf::from(&absolute_raw);
     let leaf_meta = std::fs::symlink_metadata(&absolute_path)
         .map_err(|_| TargetError::NotFound(path.to_path_buf()))?;
-    let is_symlink = leaf_meta.file_type().is_symlink();
+    // `FileType::is_symlink()` only recognises `IO_REPARSE_TAG_SYMLINK`; it
+    // does not identify other Windows reparse-point kinds such as NTFS
+    // mount-point junctions (`IO_REPARSE_TAG_MOUNT_POINT`). A junction
+    // target must be treated the same way a symlink target is here --
+    // otherwise `is_dir` stays true, this target is routed through the
+    // recursive directory pipeline against `canonical` (the junction's
+    // *resolved* destination), and the pipeline deletes the contents of
+    // whatever the junction points to instead of removing only the
+    // junction, matching how `crates/cursdel-windows/src/dirlist.rs`
+    // already classifies reparse points for children found during a walk.
+    let is_symlink = leaf_meta.file_type().is_symlink() || is_windows_reparse_point(&leaf_meta);
 
     let canonical = canonicalize_defensively(&absolute_path, path)?;
 
@@ -309,6 +319,30 @@ fn reject_root(
             resolved: PathBuf::from(resolved_lexical.display_string()),
         }
     }
+}
+
+/// True if `meta` (from `symlink_metadata`, i.e. not following the leaf
+/// itself) carries the Windows `FILE_ATTRIBUTE_REPARSE_POINT` attribute.
+/// This catches every reparse-point kind (NTFS mount-point junctions
+/// included), unlike `FileType::is_symlink()` which only recognises the
+/// `IO_REPARSE_TAG_SYMLINK` tag. Uses `MetadataExt::file_attributes()`
+/// from `std`, so no extra platform dependency is needed here.
+///
+/// TODO(windows-ci): exercising the junction case (as opposed to the
+/// ordinary-symlink case, already covered by `FileType::is_symlink()`)
+/// needs `mklink /J` or `DeviceIoControl`/`FSCTL_SET_REPARSE_POINT` against
+/// a real NTFS volume -- see the equivalent gaps noted in
+/// `crates/cursdel-windows/src/dirlist.rs` and `crates/cursdel-windows/src/ops.rs`.
+#[cfg(windows)]
+fn is_windows_reparse_point(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_windows_reparse_point(_meta: &std::fs::Metadata) -> bool {
+    false
 }
 
 /// Canonicalise `path`, falling back to canonicalising the parent directory
