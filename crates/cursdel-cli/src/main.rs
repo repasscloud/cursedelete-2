@@ -4,7 +4,7 @@ mod license_cmd;
 mod output;
 
 use clap::error::ErrorKind;
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 
 use cursdel_core::duration::AgeDuration;
 use cursdel_core::engine::CancelToken;
@@ -14,6 +14,37 @@ use cursdel_core::options::{Mode, OperationOptions, WorkerPolicy};
 use cursdel_core::size::ByteSize;
 
 use args::{Cli, Command};
+
+/// `cursdel --version` (short `-V`) stays the bare semver clap derives by
+/// default (scriptable, stable); `cursdel --version`'s *long* form and
+/// `cursdel license status`-adjacent support requests benefit from more --
+/// build profile and the actual OS/architecture this binary is running as,
+/// exactly the kind of detail a support request needs and that the
+/// previous C# implementation's own `-version`/`-vinfo` output included
+/// (OS name, 64-bit-ness, runtime version, machine/user). `std::env::consts`
+/// reports the *running* binary's target, which is what actually matters
+/// here (not the build host's), and needs no build.rs.
+fn long_version() -> &'static str {
+    // `Command::long_version` wants a `&'static str`, but the content is
+    // only known at runtime (the *running* binary's OS/arch, not
+    // necessarily the build host's). Leaking is fine here: this runs
+    // exactly once per process, for a string that needs to live for the
+    // rest of the process anyway.
+    Box::leak(
+        format!(
+            "{}\nbuild:    {} ({}-{})",
+            env!("CARGO_PKG_VERSION"),
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            },
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+        )
+        .into_boxed_str(),
+    )
+}
 
 fn main() {
     // `Cli::parse()` would call clap's own `Error::exit()` on a parse
@@ -27,8 +58,14 @@ fn main() {
     // a missing `license` subcommand, so parse errors are intercepted
     // here and mapped onto this crate's own `CliUsageError` (64) instead
     // -- except `--help`/`--version` output, which clap also routes
-    // through the error path but which must still exit 0.
-    let cli = match Cli::try_parse() {
+    // through the error path but which must still exit 0. Building the
+    // `Command` manually (rather than `Cli::parse()`/`Cli::try_parse()`)
+    // is what allows attaching `long_version` above.
+    let command = Cli::command().long_version(long_version());
+    let cli = match command
+        .try_get_matches()
+        .and_then(|matches| Cli::from_arg_matches(&matches))
+    {
         Ok(cli) => cli,
         Err(e) => {
             let _ = e.print();

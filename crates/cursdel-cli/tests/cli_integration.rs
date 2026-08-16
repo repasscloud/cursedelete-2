@@ -504,6 +504,32 @@ fn help_lists_all_documented_flags() {
 }
 
 #[test]
+fn short_version_flag_is_bare_and_scriptable() {
+    // -V stays exactly `cursdel <semver>` -- a script parsing this must
+    // never have to deal with the extra build/platform line -V.
+    cursdel()
+        .arg("-V")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"^cursdel \d+\.\d+\.\d+\n$").unwrap());
+}
+
+#[test]
+fn long_version_flag_includes_build_and_platform_detail() {
+    cursdel()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(std::env::consts::OS))
+        .stdout(predicate::str::contains(std::env::consts::ARCH))
+        .stdout(predicate::str::contains(if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }));
+}
+
+#[test]
 fn license_status_reports_community_when_unlicensed() {
     let dir = tempfile::tempdir().unwrap();
     cursdel()

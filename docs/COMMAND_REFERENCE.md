@@ -211,7 +211,23 @@ Print help for the current command or subcommand.
 
 ### `-V`, `--version`
 
-Print the `cursdel` version.
+Print the bare `cursdel <semver>` version and exit — deliberately stable
+and scriptable (`cursdel -V | cut -d' ' -f2`), never gains extra lines.
+
+### `--version` (long form)
+
+The long `--version` flag prints an additional line with build profile and
+the running binary's actual OS/architecture, useful when reporting a
+problem:
+
+```console
+$ cursdel --version
+cursdel 2.0.0
+build:    release (macos-aarch64)
+```
+
+`-V` and `--version` are otherwise the same flag; only the long spelling
+gets the extra line.
 
 ## `license` subcommand
 
