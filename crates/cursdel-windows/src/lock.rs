@@ -33,7 +33,9 @@ use std::path::Path;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, ERROR_MORE_DATA, HANDLE, WIN32_ERROR};
 use windows::Win32::NetworkManagement::NetManagement::NetApiBufferFree;
-use windows::Win32::Storage::FileSystem::{NetFileClose, NetFileEnum, FILE_INFO_3};
+use windows::Win32::Storage::FileSystem::{
+    NetFileClose, NetFileEnum, NetShareGetInfo, FILE_INFO_3, SHARE_INFO_2,
+};
 use windows::Win32::System::RestartManager::{
     RmCritical, RmEndSession, RmGetList, RmRegisterResources, RmStartSession, CCH_RM_SESSION_KEY,
     RM_PROCESS_INFO,
@@ -270,6 +272,7 @@ fn terminate_process(pid: u32) -> Option<HANDLE> {
 
 struct UncParts {
     server: String,
+    share: String,
     /// Share-relative subpath, e.g. `sub\file.txt` for
     /// `\\server\share\sub\file.txt`. May be empty if `path` names the
     /// share root itself (target validation should already reject this as
@@ -293,7 +296,61 @@ fn parse_unc(path: &Path) -> Option<UncParts> {
     if server.is_empty() || share.is_empty() {
         return None;
     }
-    Some(UncParts { server, relative })
+    Some(UncParts {
+        server,
+        share,
+        relative,
+    })
+}
+
+/// Null-terminated UTF-16 encoding of `s`, for Win32 wide-string APIs.
+fn to_wide_null(s: &str) -> Vec<u16> {
+    let mut wide: Vec<u16> =
+        std::os::windows::ffi::OsStrExt::encode_wide(std::ffi::OsStr::new(s)).collect();
+    wide.push(0);
+    wide
+}
+
+/// Resolve the server-local absolute path a share maps to (`SHARE_INFO_2`'s
+/// `shi2_path`, via `NetShareGetInfo`), so remote-open matches can be
+/// anchored to *this* share's root rather than to a bare relative suffix.
+/// Without this, two shares on the same server whose local paths happen to
+/// share a trailing suffix (e.g. both containing `sub\file.db`) would be
+/// indistinguishable by suffix alone, and `NetFileClose` would be called
+/// against opens under the wrong share.
+fn resolve_share_local_path(server: &str, share: &str) -> Result<String, String> {
+    unsafe {
+        let server_wide = to_wide_null(&format!(r"\\{server}"));
+        let share_wide = to_wide_null(share);
+
+        let mut buf_ptr: *mut u8 = std::ptr::null_mut();
+        let rc = NetShareGetInfo(
+            PCWSTR(server_wide.as_ptr()),
+            PCWSTR(share_wide.as_ptr()),
+            2,
+            &mut buf_ptr,
+        );
+        if rc != 0 {
+            return Err(format!("NetShareGetInfo failed: win32 error {rc}"));
+        }
+        if buf_ptr.is_null() {
+            return Err("NetShareGetInfo returned no data".to_string());
+        }
+
+        let info = &*(buf_ptr as *const SHARE_INFO_2);
+        let local_path = if info.shi2_path.is_null() {
+            String::new()
+        } else {
+            info.shi2_path.to_string().unwrap_or_default()
+        };
+        let _ = NetApiBufferFree(Some(buf_ptr as *const c_void));
+
+        if local_path.is_empty() {
+            Err("share has no local path".to_string())
+        } else {
+            Ok(local_path)
+        }
+    }
 }
 
 /// True if `full`'s trailing path components exactly match every component
@@ -325,13 +382,25 @@ pub fn resolve_remote_lock(path: &Path, opts: DeleteOptions) -> LockResolution {
         );
     };
 
-    let server_wide: Vec<u16> = {
-        let mut s: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(std::ffi::OsStr::new(
-            &format!(r"\\{}", parts.server),
-        ))
-        .collect();
-        s.push(0);
-        s
+    let server_wide = to_wide_null(&format!(r"\\{}", parts.server));
+
+    let share_local_path = match resolve_share_local_path(&parts.server, &parts.share) {
+        Ok(p) => p,
+        Err(msg) => {
+            return LockResolution::Unsupported(format!(
+                "could not resolve local path of share '{}' on server '{}': {msg}",
+                parts.share, parts.server
+            ));
+        }
+    };
+    let expected_local_path = if parts.relative.is_empty() {
+        share_local_path.trim_end_matches('\\').to_string()
+    } else {
+        format!(
+            "{}\\{}",
+            share_local_path.trim_end_matches('\\'),
+            parts.relative
+        )
     };
 
     let open_files = match enumerate_server_open_files(&server_wide) {
@@ -346,14 +415,14 @@ pub fn resolve_remote_lock(path: &Path, opts: DeleteOptions) -> LockResolution {
 
     let matches: Vec<u32> = open_files
         .into_iter()
-        .filter(|(_, remote_path)| path_ends_with_components(remote_path, &parts.relative))
+        .filter(|(_, remote_path)| path_ends_with_components(remote_path, &expected_local_path))
         .map(|(id, _)| id)
         .collect();
 
     if matches.is_empty() {
         return LockResolution::Failed(format!(
-            "queried {} open file(s) on server '{}' but none matched the requested path",
-            parts.relative, parts.server
+            "queried open files on server '{}' but none matched share '{}' path '{}'",
+            parts.server, parts.share, parts.relative
         ));
     }
 
@@ -471,6 +540,7 @@ mod tests {
     fn parses_plain_unc_path() {
         let parts = parse_unc(Path::new(r"\\FS01\Builds\Old\foo.db")).unwrap();
         assert_eq!(parts.server, "FS01");
+        assert_eq!(parts.share, "Builds");
         assert_eq!(parts.relative, r"Old\foo.db");
     }
 
@@ -478,6 +548,7 @@ mod tests {
     fn parses_verbatim_unc_path() {
         let parts = parse_unc(Path::new(r"\\?\UNC\FS01\Builds\Old\foo.db")).unwrap();
         assert_eq!(parts.server, "FS01");
+        assert_eq!(parts.share, "Builds");
         assert_eq!(parts.relative, r"Old\foo.db");
     }
 
@@ -490,6 +561,7 @@ mod tests {
     fn share_root_has_empty_relative_path() {
         let parts = parse_unc(Path::new(r"\\FS01\Builds")).unwrap();
         assert_eq!(parts.server, "FS01");
+        assert_eq!(parts.share, "Builds");
         assert_eq!(parts.relative, "");
     }
 
