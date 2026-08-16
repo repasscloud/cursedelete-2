@@ -1,0 +1,209 @@
+name: CI
+
+# Required checks for CurseDelete 2 on every push/PR to dev or main.
+#
+# Architecture note (see docs/adr/0001-workspace-architecture.md): each
+# platform engine crate (cursdel-windows, cursdel-linux, cursdel-macos) is
+# `#![cfg(...)]`-gated at its crate root, so it compiles to an effectively
+# empty crate on any OS that isn't its target OS. That is *why* `clippy` and
+# `test` below are run as a 3-OS matrix rather than a single job: on any one
+# OS, the other two platforms' engines don't really get compiled/linted at
+# all, so the only way to actually exercise (or even fully type-check) all
+# three platform crates is to run on all three OSes. `fmt` and the
+# dependency audit are OS-independent and stay as single jobs.
+#
+# KNOWN CURRENT STATE (see final task report / commit history): as of this
+# workflow being added, cursdel-windows and cursdel-linux are still stub
+# crates (no `WindowsEngine`/`LinuxEngine` types yet), while
+# crates/cursdel-cli/src/engine_select.rs already references
+# `cursdel_windows::WindowsEngine` and `cursdel_linux::LinuxEngine` under
+# `#[cfg(windows)]` / `#[cfg(target_os = "linux")]`. That means the `test`,
+# `clippy`, and `cross-check` legs that build on/for Windows and Linux will
+# currently fail to compile with `cannot find value/type ... in crate
+# cursdel_windows|cursdel_linux` until those engine crates land real
+# implementations (tracked separately; cursdel-macos is already complete and
+# its legs pass today). This is expected and is not a defect in this
+# workflow -- the workflow is intentionally architected to go green
+# automatically, with no changes needed, once those crates are implemented.
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy --workspace --all-targets --all-features
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test --workspace
+        run: cargo test --workspace --locked
+
+  # `fmt`, `clippy`, and `test` above run natively on the three OSes that
+  # GitHub-hosted runners provide (x86_64 Linux, Apple Silicon macOS, x86_64
+  # Windows), which covers 4 of the 6 shipping targets
+  # (x86_64-unknown-linux-gnu, aarch64-apple-darwin, x86_64-pc-windows-msvc,
+  # and -- as a side effect of macos-latest already being Apple Silicon --
+  # partial coverage of Apple platforms). The 2 remaining shipping targets
+  # (see release.yml's build matrix) are ARM64 variants that have no
+  # dedicated *test* runner here, so this job only type-checks them
+  # (`cargo check`, not `cargo test`) -- a cross-compiled binary can't be
+  # executed on the host doing the cross-compiling. Real test coverage for
+  # these targets comes from running the actual product on that hardware
+  # (not available in CI); this job exists to catch type errors, API
+  # misuse, and target-specific cfg mistakes early, per
+  # docs/adr/0001-workspace-architecture.md.
+  cross-check:
+    name: cross-check (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # aarch64-unknown-linux-gnu needs a real ARM64 cross C toolchain: the
+      # dependency graph pulls in `ring` (transitively, via ureq's TLS
+      # backend in cursdel-license) which compiles C/assembly in its
+      # build.rs even for `cargo check`, so a bare `rustup target add` is
+      # not sufficient here the way it is for a pure-Rust target.
+      - name: Install aarch64 Linux cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: cargo check --workspace --target aarch64-unknown-linux-gnu
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        env:
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo check --workspace --locked --target aarch64-unknown-linux-gnu
+
+      # aarch64-pc-windows-msvc: cross-compiling ARM64 from an x64 MSVC host
+      # is standard and does not need `cross`/Docker -- it needs the "MSVC
+      # v143 - VS 2022 C++ ARM64/ARM64EC build tools" component, which is
+      # generally present on GitHub's windows-latest runner image but has
+      # had documented gaps in some runner-image revisions (see e.g.
+      # actions/runner-images#5056 and, on the newer Windows Server
+      # 2025/VS2026 image, the currently-open
+      # actions/runner-images#14215). If this step fails specifically with
+      # a missing ARM64 linker/cl.exe, that is an upstream GitHub Actions
+      # runner-image gap, not a problem with this repo's code -- see
+      # docs/RELEASE.md for the documented fallback (pin to an older
+      # windows-* runner image label known to have the component).
+      - name: cargo check --workspace --target aarch64-pc-windows-msvc
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        run: cargo check --workspace --locked --target aarch64-pc-windows-msvc
+
+      # x86_64-apple-darwin: Xcode's clang cross-compiles x86_64 from an
+      # Apple Silicon host out of the box (no extra toolchain needed), so
+      # this is a plain check.
+      - name: cargo check --workspace --target x86_64-apple-darwin
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: cargo check --workspace --locked --target x86_64-apple-darwin
+
+  audit:
+    name: dependency audit (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # cargo-deny, not cargo-audit: see deny.toml's header comment for why
+      # (license compliance across the dependency graph matters for a
+      # commercially-licensed product, not just RustSec advisories).
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: stable
+          command: check
+          arguments: --workspace --all-features --locked
+
+  # Single required-status-check name for branch protection, so a human
+  # configuring branch protection rules doesn't have to individually list
+  # every matrix leg above (which would also need updating every time the
+  # matrix changes). Add/remove job names in `needs:` if the jobs above
+  # change.
+  ci:
+    name: CI required checks
+    if: always()
+    needs: [fmt, clippy, test, cross-check, audit]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any required job did not succeed
+        # Note: needs['cross-check'] (bracket syntax), not needs.cross-check
+        # -- the job id has a hyphen, and GitHub Actions expression syntax
+        # parses `.` dot-property access as an identifier that cannot
+        # contain `-` (it would otherwise be read as subtraction).
+        if: >-
+          needs.fmt.result != 'success' ||
+          needs.clippy.result != 'success' ||
+          needs.test.result != 'success' ||
+          needs['cross-check'].result != 'success' ||
+          needs.audit.result != 'success'
+        run: |
+          echo "One or more required CI jobs did not succeed:"
+          echo "  fmt:         ${{ needs.fmt.result }}"
+          echo "  clippy:      ${{ needs.clippy.result }}"
+          echo "  test:        ${{ needs.test.result }}"
+          echo "  cross-check: ${{ needs['cross-check'].result }}"
+          echo "  audit:       ${{ needs.audit.result }}"
+          exit 1

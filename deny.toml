@@ -1,0 +1,132 @@
+# cargo-deny configuration for CurseDelete 2.
+#
+# Run locally with `cargo deny check` (requires `cargo install cargo-deny`).
+# CI runs this via `.github/workflows/ci.yml`'s `audit` job using the
+# `EmbarkStudios/cargo-deny-action`.
+#
+# Why cargo-deny over `cargo audit`: cargo-deny does everything `cargo audit`
+# does (RustSec advisory-DB scanning, in `[advisories]` below) *plus* license
+# compliance and dependency-source provenance in the same tool/config/CI job.
+# License compliance specifically matters here because CurseDelete 2 is dual
+# licensed under a commercial license and MIT (see workspace `Cargo.toml`,
+# `license = "LicenseRef-CurseDelete-Commercial OR MIT"`) and sold
+# commercially: a transitive dependency landing under a copyleft license that
+# is incompatible with commercial redistribution (e.g. GPL/AGPL) would be a
+# licensing defect, not just a security one, and `cargo audit` alone would
+# never catch it. `[bans]` and `[sources]` (also cargo-deny features with no
+# `cargo audit` equivalent) guard against dependency confusion / supply-chain
+# surprises: only crates.io is trusted as a source.
+#
+# Baseline generated with `cargo deny init` (cargo-deny 0.20.2) and then
+# trimmed/filled in against this workspace's actual `cargo deny check`
+# output rather than guessed. See inline comments for provenance of each
+# allowed license.
+
+[graph]
+# All six product targets from the release matrix (see
+# .github/workflows/release.yml) are checked, not just the host running
+# `cargo deny check`, so a target-specific dependency (e.g. the `windows`
+# crate, which only appears in the dependency graph for Windows targets)
+# can't silently skip license/advisory review just because nobody happened
+# to run the check on that OS.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+
+[output]
+feature-depth = 1
+
+# https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html
+[advisories]
+# No advisories are ignored. Every RUSTSEC advisory affecting a crate in the
+# dependency graph fails the check; unmaintained/yanked warnings are also
+# surfaced. If a future advisory is a false positive or genuinely
+# unactionable, add a documented entry here rather than disabling the job.
+ignore = []
+
+# https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html
+[licenses]
+# Every license actually present in `cargo deny check`'s dependency graph
+# (workspace crates + all transitive third-party crates, across all six
+# release targets above) as of the crate versions pinned in Cargo.lock.
+# Each entry below is annotated with which crate(s) introduce it so a
+# reviewer doesn't have to re-run the graph to know why it's here.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    # webpki-roots (Mozilla's bundled root CA list, pulled in transitively
+    # via ureq's TLS backend in cursdel-license).
+    "CDLA-Permissive-2.0",
+    # subtle (constant-time crypto primitives, transitive dependency of
+    # p256/ecdsa in cursdel-license).
+    "BSD-3-Clause",
+    # ring itself ("Apache-2.0 AND ISC"), plus rustls-webpki and untrusted
+    # (all part of the rustls/ring TLS stack pulled in via ureq).
+    "ISC",
+    # unicode-ident and friends: "(MIT OR Apache-2.0) AND Unicode-3.0".
+    "Unicode-3.0",
+    # option-ext, a dependency of `directories` (used by cursdel-license for
+    # locating the license store). MPL-2.0 is file-level weak copyleft, not
+    # a "poison" license: it only obligates sharing modifications to
+    # option-ext's own files, not to CurseDelete, so it's compatible with
+    # commercial redistribution.
+    "MPL-2.0",
+    # CurseDelete's own workspace crates
+    # ("LicenseRef-CurseDelete-Commercial OR MIT"). Listed explicitly for
+    # clarity even though the `OR MIT` branch above already satisfies it.
+    "LicenseRef-CurseDelete-Commercial",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[licenses.private]
+ignore = false
+registries = []
+
+# https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html
+[bans]
+# Multiple versions of the same crate in the graph (e.g. differing
+# `windows-sys` pins from unrelated dependency trees) are extremely common
+# in real-world Rust workspaces and are not, by themselves, a defect --
+# warn rather than fail the build on them.
+multiple-versions = "warn"
+# Left at the cargo-deny default ("allow") rather than "deny": cargo-deny
+# treats this workspace's own `{ workspace = true }` path dependencies
+# between first-party crates (cursdel-cli -> cursdel-core, etc.) as
+# "wildcard" dependencies too, since a path dependency has no version
+# requirement -- that's a cargo-deny limitation with workspace-inherited
+# dependencies, not a real unpinned external dependency, and denying it
+# would fail the build on our own workspace layout. External wildcard
+# ("*") version requirements from third-party crates would still show up
+# here if introduced; watch for `error[wildcard]` pointing at a crate that
+# isn't one of the `cursdel-*` workspace members.
+wildcards = "allow"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+allow-workspace = true
+deny = []
+skip = []
+skip-tree = []
+
+# https://embarkstudios.github.io/cargo-deny/checks/sources/cfg.html
+[sources]
+# Unlike the generated default (`"warn"`), unknown sources are denied: this
+# is a security-audit gate, and a dependency quietly switching to a git
+# fork or a non-crates.io registry (a classic dependency-confusion /
+# supply-chain attack vector) should fail CI loudly, not just warn.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[sources.allow-org]
+github = []
+gitlab = []
+bitbucket = []
