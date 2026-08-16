@@ -7,15 +7,19 @@
 # Why cargo-deny over `cargo audit`: cargo-deny does everything `cargo audit`
 # does (RustSec advisory-DB scanning, in `[advisories]` below) *plus* license
 # compliance and dependency-source provenance in the same tool/config/CI job.
-# License compliance specifically matters here because CurseDelete 2 is dual
-# licensed under a commercial license and MIT (see workspace `Cargo.toml`,
-# `license = "LicenseRef-CurseDelete-Commercial OR MIT"`) and sold
-# commercially: a transitive dependency landing under a copyleft license that
-# is incompatible with commercial redistribution (e.g. GPL/AGPL) would be a
-# licensing defect, not just a security one, and `cargo audit` alone would
-# never catch it. `[bans]` and `[sources]` (also cargo-deny features with no
-# `cargo audit` equivalent) guard against dependency confusion / supply-chain
-# surprises: only crates.io is trusted as a source.
+# License compliance specifically matters here because CurseDelete 2 is
+# intended to be sold commercially with a paid Business/Enterprise tier
+# (see docs/LICENSING.md) even though the workspace `Cargo.toml` currently
+# carries a plain `Apache-2.0` as a provisional placeholder pending a real
+# business/legal decision on the product's actual source license (see
+# ADR-0009, `docs/adr/0009-source-license-open-question.md`) -- regardless
+# of how that question is ultimately resolved, a transitive dependency
+# landing under a copyleft license incompatible with commercial
+# redistribution (e.g. GPL/AGPL) would be a licensing defect, not just a
+# security one, and `cargo audit` alone would never catch it. `[bans]` and
+# `[sources]` (also cargo-deny features with no `cargo audit` equivalent)
+# guard against dependency confusion / supply-chain surprises: only
+# crates.io is trusted as a source.
 #
 # Baseline generated with `cargo deny init` (cargo-deny 0.20.2) and then
 # trimmed/filled in against this workspace's actual `cargo deny check`
@@ -76,10 +80,9 @@ allow = [
     # option-ext's own files, not to CurseDelete, so it's compatible with
     # commercial redistribution.
     "MPL-2.0",
-    # CurseDelete's own workspace crates
-    # ("LicenseRef-CurseDelete-Commercial OR MIT"). Listed explicitly for
-    # clarity even though the `OR MIT` branch above already satisfies it.
-    "LicenseRef-CurseDelete-Commercial",
+    # CurseDelete's own workspace crates currently declare "Apache-2.0"
+    # (already allowed above) -- no separate entry needed. See ADR-0009 if
+    # that ever changes to a custom LicenseRef-* expression.
 ]
 confidence-threshold = 0.8
 exceptions = []

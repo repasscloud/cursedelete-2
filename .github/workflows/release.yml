@@ -103,7 +103,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "dist/$Stage" | Out-Null
           Copy-Item "target/$Target/release/cursdel.exe" "dist/$Stage/"
           Copy-Item "LICENSE" "dist/$Stage/"
-          Copy-Item "README-CurseDelete2.md" "dist/$Stage/README.md"
+          Copy-Item "README.md" "dist/$Stage/README.md"
           Compress-Archive -Path "dist/$Stage/*" -DestinationPath "dist/$Stage.zip"
 
       - uses: actions/upload-artifact@v7
@@ -166,7 +166,7 @@ jobs:
           mkdir -p "dist/${stage}"
           cp "target/${target}/release/cursdel" "dist/${stage}/"
           cp LICENSE "dist/${stage}/"
-          cp README-CurseDelete2.md "dist/${stage}/README.md"
+          cp README.md "dist/${stage}/README.md"
           tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
 
       - uses: actions/upload-artifact@v7
@@ -224,7 +224,7 @@ jobs:
           mkdir -p "dist/${stage}"
           cp "target/${target}/release/cursdel" "dist/${stage}/"
           cp LICENSE "dist/${stage}/"
-          cp README-CurseDelete2.md "dist/${stage}/README.md"
+          cp README.md "dist/${stage}/README.md"
           tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
 
       - uses: actions/upload-artifact@v7

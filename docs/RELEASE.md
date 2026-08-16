@@ -50,9 +50,8 @@ Every binary is built with the workspace's `[profile.release]` in
 release binaries are already stripped as part of the normal build -- no
 separate strip step is needed in the workflow.
 
-Each target's binary (`cursdel` / `cursdel.exe`) is packaged with the repo's
-`LICENSE` and a copy of `README-CurseDelete2.md` (renamed to `README.md`
-inside the archive) into:
+Each target's binary (`cursdel` / `cursdel.exe`) is packaged with the
+repo's `LICENSE` and a copy of the real user-facing `README.md` into:
 
 - `cursdel-<version>-<target>.zip` for Windows targets, built with
   PowerShell's `Compress-Archive` (no extra tooling required on the

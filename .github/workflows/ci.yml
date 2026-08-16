@@ -12,19 +12,12 @@ name: CI
 # three platform crates is to run on all three OSes. `fmt` and the
 # dependency audit are OS-independent and stay as single jobs.
 #
-# KNOWN CURRENT STATE (see final task report / commit history): as of this
-# workflow being added, cursdel-windows and cursdel-linux are still stub
-# crates (no `WindowsEngine`/`LinuxEngine` types yet), while
-# crates/cursdel-cli/src/engine_select.rs already references
-# `cursdel_windows::WindowsEngine` and `cursdel_linux::LinuxEngine` under
-# `#[cfg(windows)]` / `#[cfg(target_os = "linux")]`. That means the `test`,
-# `clippy`, and `cross-check` legs that build on/for Windows and Linux will
-# currently fail to compile with `cannot find value/type ... in crate
-# cursdel_windows|cursdel_linux` until those engine crates land real
-# implementations (tracked separately; cursdel-macos is already complete and
-# its legs pass today). This is expected and is not a defect in this
-# workflow -- the workflow is intentionally architected to go green
-# automatically, with no changes needed, once those crates are implemented.
+# All three platform engines (cursdel-macos, cursdel-windows, cursdel-linux)
+# are implemented as of this workflow landing, each validated on this
+# project's macOS development host via cross-compilation (cargo check/
+# clippy) since no single host can natively build all three -- this
+# workflow's 3-OS matrix is what gives each engine a real, native
+# build+test on its own OS for the first time.
 
 on:
   push:
