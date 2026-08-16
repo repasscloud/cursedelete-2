@@ -25,8 +25,8 @@ CurseDelete terminating something it shouldn't just to force progress.
 | Platform | Status | Mechanism |
 |---|---|---|
 | macOS | **Implemented** | Shells out to `lsof -t <path>` to enumerate holding PIDs, then sends `SIGTERM` to each non-protected PID. |
+| Windows | **Implemented** | Windows Restart Manager (`RmStartSession`/`RmRegisterResources`/`RmGetList`) identifies holders; since `RmShutdown` only politely asks a process to close via `WM_QUERYENDSESSION` (which most non-GUI/service processes never answer), the engine terminates the identified holder directly via `TerminateProcess`, then waits on the process handle for actual exit before returning. Protects the current process, anything Restart Manager itself flags critical, a system-process name denylist, and (conservatively) any holder whose executable name can't even be resolved. See [ADR-0007](adr/0007-windows-engine.md). Validated by cross-compilation and unit tests; a live second process to terminate needs a real Windows session (`TODO(windows-ci)`). |
 | Linux | Planned, not yet implemented | The `cursdel-linux` engine is currently a stub — see [README.md](../README.md#platform-support). A `/proc`-based holder search (scanning `/proc/*/fd` symlinks) is the natural equivalent, but nothing is shipped yet. |
-| Windows | Planned, not yet implemented | The `cursdel-windows` engine is currently a stub. The product design calls for the Windows Restart Manager API as the first-choice mechanism, per the original architecture brief — not yet implemented. |
 
 ### Why macOS shells out to `lsof`
 
@@ -103,11 +103,24 @@ cursdel \\FS01\Builds\Old --force --close-remote-locks
 
 ### Current implementation status
 
-The Windows engine (`cursdel-windows`) that would actually perform a remote
-SMB open closure is not yet implemented — see
-[README.md](../README.md#platform-support). On the one platform engine
-that *is* implemented today (macOS), `--close-remote-locks` is always
-reported unsupported:
+The Windows engine (`cursdel-windows`) implements remote SMB open closure
+via `NetFileEnum`/`NetFileClose` against the UNC path's server: it parses
+the server and share-relative path out of the UNC target, enumerates that
+server's open files, matches by comparing the trailing path components of
+each open file's local path against the requested share-relative path
+(a sound comparison — a share always maps its root to some local path, so
+everything below the share root has identical relative structure on both
+views, not a heuristic guess), and calls `NetFileClose` on every match.
+Any non-UNC path, or any `NetFileEnum`/`NetFileClose` failure (access
+denied on the remote server, RPC unreachable, the server doesn't
+implement this API at all — Samba, NetApp, Synology, ...), is reported as
+`Unsupported` with an honest message, never a faked success. This still
+needs validation against a real file server (`TODO(windows-ci)` in
+`crates/cursdel-windows/src/lock.rs`) — see
+[ADR-0007](adr/0007-windows-engine.md).
+
+On macOS (and Linux, once implemented), `--close-remote-locks` is always
+reported unsupported, per the product's Windows-server-only requirement:
 
 ```console
 # from cursdel-macos/src/lock.rs::resolve_remote_lock, verified by its own test suite

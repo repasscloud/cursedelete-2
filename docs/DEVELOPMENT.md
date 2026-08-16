@@ -48,9 +48,8 @@ crates/
 ├── cursdel-license/    offline license verification + online activation
 │                       client. No dependency on cursdel-core.
 ├── cursdel-macos/      native macOS deletion engine (implemented).
-├── cursdel-linux/      native Linux deletion engine (stub — see
-│                       "Platform implementation status" below).
-└── cursdel-windows/    native Windows deletion engine (stub — see
+├── cursdel-windows/    native Windows deletion engine (implemented).
+└── cursdel-linux/      native Linux deletion engine (stub — see
                         "Platform implementation status" below).
 ```
 
@@ -74,8 +73,8 @@ implementations' approaches.
 | Platform | Status |
 |---|---|
 | macOS | Implemented, tested. Reference implementation for the `PlatformEngine` trait. |
+| Windows | Implemented (`FindFirstFileExW` enumeration, `FILE_DISPOSITION_INFO_EX` deletion with a classic fallback, ownership/ACL remediation, Restart Manager for `--kill-locks`, `NetFileEnum`/`NetFileClose` for `--close-remote-locks` — see [ADR-0007](adr/0007-windows-engine.md)). Validated by cross-compilation (`cargo check`/`clippy` for `x86_64-pc-windows-msvc` and `x86_64-pc-windows-gnu`) and unit tests for all logic that doesn't require a live Windows session; real-filesystem behaviour is marked with `TODO(windows-ci)` comments pending validation on an actual Windows machine. |
 | Linux | Not yet implemented (`crates/cursdel-linux/src/lib.rs` is a stub — `// Implemented in a later step.`). |
-| Windows | Not yet implemented (`crates/cursdel-windows/src/lib.rs` is a stub, same as above). |
 
 `cursdel-core` (the streaming pipeline, adaptive worker controller, target
 safety, filters, retention, and reporting) is fully platform-independent
@@ -91,24 +90,32 @@ rather than requiring real NVMe/HDD/SMB hardware in CI.
 cargo test --workspace
 ```
 
-This runs all unit tests across every crate (140 passing as of this
-writing: 74 in `cursdel-core`, 44 in `cursdel-license`, 18 in
-`cursdel-macos`, 4 in `cursdel-policy`; `cursdel-cli`,
-`cursdel-linux`, and `cursdel-windows` currently have none of their own).
-The macOS engine's own test suite includes an end-to-end run of the full
-`cursdel-core` pipeline against the real engine over a temporary directory
-tree — the closest thing to an integration test currently in the
-repository.
+This runs all unit and integration tests across every crate (167 passing
+as of this writing: 76 in `cursdel-core`, 44 in `cursdel-license`, 25 CLI
+integration tests in `cursdel-cli`, 18 in `cursdel-macos`, 4 in
+`cursdel-policy`; `cursdel-linux` and `cursdel-windows` currently run 0 of
+their own on a macOS host since both are `cfg`-gated to their target OS —
+their unit tests exist in source and run in CI on their native platform).
+The macOS and Windows engines' own test suites each include an end-to-end
+run of the full `cursdel-core` pipeline against the real engine over a
+temporary directory tree; `cursdel-cli`'s integration suite
+(`crates/cursdel-cli/tests/cli_integration.rs`) goes a step further and
+spawns the actual `cursdel` binary as a subprocess, including a real
+SIGINT sent mid-operation to exercise the documented `Interrupted` exit
+code.
 
-There is no separate `tests/integration/`, `tests/destructive/`, or
-`tests/benchmark/` directory at the workspace root as of this writing,
-despite both being referenced in the original architecture brief
-(`README-CurseDelete2.md`) and `docs/adr/0003-adaptive-workers.md`
-referencing a `docs/BENCHMARKS.md` that also does not exist yet. Treat
-these as planned, not shipped — the license crate does ship real,
-non-synthetic fixtures under `crates/cursdel-license/tests/fixtures/` (see
-[ADR-0004](adr/0004-licensing-integration.md)), which is the one place a
-`tests/` directory currently exists in the workspace.
+`tests/benchmark/` (a Python harness comparing `cursdel` against `rm -rf`
+on synthetic trees, see [docs/BENCHMARKS.md](../docs/BENCHMARKS.md) for
+real -- not fabricated -- results captured with it) exists at the
+workspace root. `tests/integration/` and `tests/destructive/`, referenced
+in the original architecture brief (`README-CurseDelete2.md`) as
+suggested locations for further destructive/integration coverage, remain
+empty placeholders beyond what `crates/cursdel-cli/tests/` and
+`crates/cursdel-license/tests/fixtures/` already provide -- the CLI
+integration suite already exercises real destructive operations inside
+isolated `tempfile::tempdir()` roots, which is where the requirement
+("destructive tests must run in isolated temporary test roots") is
+actually satisfied today.
 
 ### Running a single crate's tests
 

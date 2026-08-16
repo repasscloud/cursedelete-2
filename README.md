@@ -10,17 +10,17 @@ the CLI binary is `cursdel`.
 
 ## Status
 
-The core engine, macOS platform engine, license verification, and CLI are
-implemented and tested. Linux and Windows platform engines are stubs under
-active development — see [Platform support](#platform-support) below for
-exactly what that means today. This is pre-release software; no versioned
-release binaries are published yet.
+The core engine, macOS platform engine, Windows platform engine, license
+verification, and CLI are implemented and tested. The Linux platform
+engine is a stub under active development — see
+[Platform support](#platform-support) below for exactly what that means
+today. This is pre-release software; no versioned release binaries are
+published yet.
 
 ## Install
 
-No prebuilt release binaries are published yet, and there is no CI/release
-pipeline (`.github/workflows/`) in the repository as of this writing.
-Building from source is currently the only way to get `cursdel`:
+No prebuilt release binaries are published yet. Building from source is
+currently the only way to get `cursdel`:
 
 ```bash
 git clone https://github.com/danijeljw-RPC/cursedelete-2.git
@@ -39,8 +39,8 @@ run.
 | Platform | Engine status |
 |---|---|
 | macOS | **Implemented and tested.** Native Darwin/POSIX primitives (`openat`/`unlinkat`/`fstatat`), the reference implementation of the `PlatformEngine` trait. |
+| Windows | **Implemented.** Native Win32 primitives (`FindFirstFileExW`, `FILE_DISPOSITION_INFO_EX` with a classic `DeleteFileW`/`RemoveDirectoryW` fallback, ownership/ACL remediation, Restart Manager for `--kill-locks`, `NetFileEnum`/`NetFileClose` for `--close-remote-locks`) — see [ADR-0007](docs/adr/0007-windows-engine.md). Validated by cross-compilation (`cargo check`/`clippy` for `x86_64-pc-windows-msvc`/`-gnu`) and unit tests for all pure logic; real-filesystem behaviour (junctions, a live second process to terminate, a real file server) still needs validation on an actual Windows machine — see the `TODO(windows-ci)` markers in the crate. |
 | Linux | **Not yet implemented.** `crates/cursdel-linux` currently compiles to an empty stub; native `openat`/`unlinkat`/`statx` support via `libc` is planned. |
-| Windows | **Not yet implemented.** `crates/cursdel-windows` currently compiles to an empty stub; native Win32 (`FindFirstFileExW`, `FILE_DISPOSITION_INFO_EX`, ACL remediation, Restart Manager) support is planned. |
 
 `cursdel-core` — the streaming pipeline, adaptive worker controller,
 target-safety validation, filters/retention, and reporting — is fully

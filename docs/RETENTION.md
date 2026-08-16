@@ -101,13 +101,22 @@ unavailable-timestamp rule above) rather than silently falling back to a
 different timestamp. Treat this as a known open question to verify once
 the Linux engine ships, not a documented guarantee either way.
 
-### Windows (not yet implemented)
+### Windows (implemented)
 
-Also a stub as of this writing. Windows/NTFS does report file creation
-time (`FILE_BASIC_INFO`/`GetFileTime`) reliably, so `--age-by created` is
-expected to work when the engine is implemented — but this is a forward
-expectation based on the platform's general behavior, not a verified,
-shipped implementation, and will be confirmed here once real.
+`crates/cursdel-windows/src/dirlist.rs` populates all three timestamps
+(`modified`, `created`, `accessed`) directly from the
+`ftLastWriteTime`/`ftCreationTime`/`ftLastAccessTime` fields
+`FindFirstFileExW` already returns as part of enumeration — no extra
+per-file syscall. NTFS/ReFS reliably track a real creation time, so
+`--age-by created` is expected to work correctly; `accessed` still carries
+the general last-access-time caveat below (Windows disables last-access-
+time updates by default on modern systems for performance, similar in
+spirit to Linux's `relatime`). Real-filesystem confirmation of exact
+timestamp behaviour is one of the `TODO(windows-ci)` items pending a live
+Windows session — the field mapping itself is implemented and unit-tested
+for the `FILETIME`→`SystemTime` conversion (100ns intervals since
+1601-01-01, converted precisely, not approximated) in
+`crates/cursdel-windows/src/sys.rs`.
 
 ### The `accessed`/`noatime` caveat (all platforms)
 
