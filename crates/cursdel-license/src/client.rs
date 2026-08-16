@@ -285,6 +285,14 @@ mod tests {
         assert_eq!(decoded.len(), 32);
     }
 
+    // NOTE: mutates the real process environment (`std::env::remove_var`),
+    // which is shared, unsynchronised global state across every test
+    // thread in this binary (`cargo test` runs tests as threads within
+    // one process, not separate processes). Safe today because no other
+    // test in this crate reads `SERVER_URL_ENV_VAR` -- if a future test
+    // needs to depend on that variable's value, give it its own
+    // dependency-injected override instead of adding another env mutation
+    // here, to avoid a real cross-test race.
     #[test]
     fn default_server_url_is_documented_dev_url_when_env_unset() {
         std::env::remove_var(SERVER_URL_ENV_VAR);
