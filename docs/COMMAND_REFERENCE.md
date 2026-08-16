@@ -65,14 +65,22 @@ Default: `auto`.
 
 - `auto` starts from a small CPU-scaled seed (clamped between 4 and 16) and
   lets an adaptive hill-climbing controller grow or shrink concurrency
-  every ~400ms based on observed throughput and error rate, up to a ceiling
-  of 256. This is the right choice for almost every invocation — the
-  optimal concurrency for a local NVMe drive, a spinning disk, and a
-  high-latency SMB share are wildly different, and `auto` finds a
-  reasonable point on each without you having to know which one you're
-  facing. See [ADR-0003](adr/0003-adaptive-workers.md) for exactly how the
-  controller decides, including why it backs off immediately once errors
-  exceed 15% of a sampling window.
+  every ~400ms based on observed throughput and error rate, up to a
+  CPU-scaled ceiling (16 workers per logical CPU, clamped between 32 and
+  256 — e.g. 160 on a 10-core machine). The ceiling is proportional to CPU
+  count, not a flat constant, because every worker up to it is pre-spawned
+  as a real OS thread regardless of whether the adaptive controller ever
+  grows into it (see [ADR-0003](adr/0003-adaptive-workers.md)); a flat
+  256-thread pre-spawn measurably hurt small-tree performance in
+  benchmarking (see [docs/BENCHMARKS.md](BENCHMARKS.md)) purely from
+  fixed thread-creation overhead, which the CPU-scaled ceiling fixes. This
+  is the right choice for almost every invocation — the optimal
+  concurrency for a local NVMe drive, a spinning disk, and a high-latency
+  SMB share are wildly different, and `auto` finds a reasonable point on
+  each without you having to know which one you're facing. See
+  [ADR-0003](adr/0003-adaptive-workers.md) for exactly how the controller
+  decides, including why it backs off immediately once errors exceed 15%
+  of a sampling window.
 - `N` (a positive integer) disables the adaptive controller entirely and
   uses exactly `N` worker threads for the whole run — deterministic,
   reproducible, and appropriate for benchmarking or for a target you've
