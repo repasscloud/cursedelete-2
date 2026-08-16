@@ -2,7 +2,7 @@
 //!
 //! The wire format only requires two things to interoperate with the
 //! server: the literal `scheme` string `"os-machine-id-sha256-v1"`
-//! (checked by [`crate::schema::optional_device_binding`], mirroring the
+//! (checked by `crate::schema`'s device-binding parsing, mirroring the
 //! server's own schema check), and a 64-character hex `deviceId`. The
 //! *hash formula* itself does not need to match `Licensing.Core`'s C#
 //! implementation byte-for-byte -- unlike the signature envelope, the

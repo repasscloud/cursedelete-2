@@ -10,9 +10,10 @@
 //! `LicenseGenerator` CLI and observing the exact output byte-for-byte
 //! (see `tests/fixtures/exhaustive.license` and
 //! `docs/adr/0004-licensing-integration.md`). Getting this wrong means
-//! every signature silently fails to verify, so
-//! [`tests::matches_real_dotnet_output_exhaustive`] pins the whole table
-//! down against that real fixture rather than trusting this doc comment.
+//! every signature silently fails to verify, so the
+//! `matches_real_dotnet_output_exhaustive` test (in this module's
+//! `#[cfg(test)]` block) pins the whole table down against that real
+//! fixture rather than trusting this doc comment.
 //!
 //! The escaping rules, precisely:
 //! - `"` -> `"` (not the JSON shorthand `\"`)
