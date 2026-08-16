@@ -1,0 +1,4 @@
+# Normalize line endings to LF on checkout, regardless of platform/git config
+# (e.g. Windows runners with core.autocrlf=true). Several tests read fixture
+# files as raw bytes and are sensitive to CRLF vs LF.
+* text=auto eol=lf
