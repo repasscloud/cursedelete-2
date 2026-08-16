@@ -37,6 +37,9 @@ pub enum AgeDurationParseError {
     #[error("'--age {0}' must be greater than zero")]
     NotPositive(String),
 
+    #[error("'--age {0}' is too large to represent as a duration")]
+    TooLarge(String),
+
     #[error("'--age' value was empty")]
     Empty,
 }
@@ -86,6 +89,13 @@ impl FromStr for AgeDuration {
         };
 
         let total_seconds = value * seconds_per_unit;
+        // A sufficiently long digit string (or a merely huge but finite
+        // value) parses fine as an f64 but overflows what `Duration` can
+        // hold; `Duration::from_secs_f64` panics on both a non-finite input
+        // and one that overflows, so both must be rejected here first.
+        if !total_seconds.is_finite() || total_seconds > Duration::MAX.as_secs_f64() {
+            return Err(AgeDurationParseError::TooLarge(trimmed.to_string()));
+        }
         Ok(AgeDuration(Duration::from_secs_f64(total_seconds)))
     }
 }
@@ -166,6 +176,24 @@ mod tests {
             "1.5h".parse::<AgeDuration>().unwrap().as_duration(),
             Duration::from_secs(5_400)
         );
+    }
+
+    #[test]
+    fn rejects_digit_string_that_overflows_to_infinity() {
+        let huge = "9".repeat(400);
+        let err = format!("{huge}d").parse::<AgeDuration>().unwrap_err();
+        assert!(matches!(err, AgeDurationParseError::TooLarge(_)));
+    }
+
+    #[test]
+    fn rejects_finite_value_that_overflows_duration() {
+        // 25 nines parses as a perfectly finite f64 (~1e25), but that is
+        // already far beyond what `Duration` (max ~1.8e19 seconds) can
+        // represent -- distinct from the `is_finite()` case above, where
+        // the *parse itself* overflows to infinity.
+        let big = "9".repeat(25);
+        let err = format!("{big}w").parse::<AgeDuration>().unwrap_err();
+        assert!(matches!(err, AgeDurationParseError::TooLarge(_)));
     }
 
     #[test]
