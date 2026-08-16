@@ -9,7 +9,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - 'v[0-9]+\.[0-9]+\.[0-9]+'
 
 permissions:
   contents: write # required to create the GitHub Release and upload assets
@@ -239,6 +239,35 @@ jobs:
     needs: [check-version, build-windows, build-linux, build-macos]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+
+      # CHANGELOG.md follows Keep a Changelog: "## [X.Y.Z] - YYYY-MM-DD" headings, one
+      # section per release. Pulling the section for this tag's version out now, before
+      # the GitHub Release is published, means a missing changelog entry fails loudly
+      # instead of shipping a release with no matching notes.
+      - name: Extract changelog section for this release
+        env:
+          VERSION: ${{ needs['check-version'].outputs.version }}
+        run: |
+          set -euo pipefail
+          awk -v ver="$VERSION" '
+            /^## \[/ {
+              if (found) exit
+              if ($0 == "## [" ver "]" || index($0, "## [" ver "] - ") == 1) { found = 1; next }
+              next
+            }
+            # Stop before the trailing "[label]: url" reference-link block at the end of
+            # the file, in case this version is ever the last section.
+            found && /^\[.*\]: / { exit }
+            found && !started && /^[[:space:]]*$/ { next } # drop the blank line right after the heading
+            found { started = 1; print }
+          ' CHANGELOG.md > release-notes.md
+
+          if [ ! -s release-notes.md ]; then
+            echo "::error::No '## [$VERSION]' section found in CHANGELOG.md for tag ${GITHUB_REF_NAME}. Add a dated changelog section for this version before tagging."
+            exit 1
+          fi
+
       - uses: actions/download-artifact@v7
         with:
           path: artifacts
@@ -258,4 +287,4 @@ jobs:
         with:
           files: artifacts/*
           fail_on_unmatched_files: true
-          generate_release_notes: true
+          body_path: release-notes.md

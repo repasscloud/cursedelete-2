@@ -9,6 +9,8 @@ source of truth; see `docs/RELEASE.md` for how a release is cut).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-08-17
+
 ### Added
 
 - Initial CurseDelete 2 Rust rewrite: Cargo workspace with shared
@@ -27,4 +29,5 @@ source of truth; see `docs/RELEASE.md` for how a release is cut).
   GitHub Releases with checksums. See `docs/RELEASE.md` for the process and
   what's still manual (code signing, WinGet, Linux package managers).
 
-[Unreleased]: https://github.com/danijeljw-RPC/cursedelete-2/compare/main...dev
+[Unreleased]: https://github.com/danijeljw-RPC/cursedelete-2/compare/v2.0.0...dev
+[2.0.0]: https://github.com/danijeljw-RPC/cursedelete-2/releases/tag/v2.0.0
