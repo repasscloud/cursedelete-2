@@ -81,5 +81,15 @@ not to be worth the cross-platform architecture cost for this pass.
   handle) that the Windows engine does not currently use either -- see
   `docs/adr/0007-windows-engine.md` for the Windows engine's own,
   differently-shaped residual risk in the same area.
+- **This follow-up is also a measured performance opportunity, not just a
+  security one.** `docs/BENCHMARKS.md` shows CurseDelete meaningfully
+  slower than `rm -rf` specifically on deep, narrow trees (0.21x-0.43x
+  throughput at 50 directory levels, vs. 0.98x-1.15x on shallow/wide
+  trees of the same file count) -- the *same* per-delete "reopen the
+  parent by full path" pattern that provides the TOCTOU mitigation also
+  costs a full path resolution proportional to depth on every single
+  delete, where `rm -rf`'s own implementation opens each directory once
+  and reuses that descriptor for every child in it. Fixing the security
+  gap and fixing this performance gap are the same code change.
 - This is strictly stronger than both prior implementations, which had no
   TOCTOU mitigation at all.

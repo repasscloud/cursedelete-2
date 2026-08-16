@@ -31,7 +31,22 @@ const ENUM_CHANNEL_CAP: usize = 4096;
 const FILE_CHANNEL_CAP: usize = 4096;
 const DIR_CHANNEL_CAP: usize = 4096;
 const DIR_WORKER_COUNT: usize = 4;
-const DEFAULT_AUTO_MAX_WORKERS: usize = 256;
+/// Absolute ceiling on how many file-worker OS threads `--workers auto`
+/// will ever pre-spawn, regardless of CPU count. Manual `--workers <n>`
+/// is not bound by this -- an operator who explicitly asks for more
+/// concurrency gets exactly what they asked for.
+const AUTO_MAX_WORKERS_CEILING: usize = 256;
+/// How many file-worker threads (per available CPU) `--workers auto`
+/// pre-spawns as its ceiling. Every one of these threads is spawned
+/// up front (see `docs/adr/0003-adaptive-workers.md`) even though the
+/// adaptive controller may never grow concurrency anywhere near it, so
+/// this must stay proportionate to real hardware rather than a large
+/// flat constant: benchmarking a small tree (a few hundred files) showed
+/// a fixed 256-thread pre-spawn taking multiple seconds of pure thread-
+/// creation overhead on a 10-core machine, several times slower than
+/// `rm -rf` on the same tree purely from that fixed cost -- see
+/// `docs/BENCHMARKS.md`.
+const AUTO_MAX_WORKERS_PER_CPU: usize = 16;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(400);
 const MAX_STORED_FAILURES: usize = 10_000;
 
@@ -140,7 +155,8 @@ pub fn run(
         WorkerPolicy::Auto => {
             let cpu = num_cpus::get().max(1);
             let initial = cpu.clamp(4, 16);
-            (1, DEFAULT_AUTO_MAX_WORKERS, initial)
+            let ceiling = (cpu * AUTO_MAX_WORKERS_PER_CPU).clamp(32, AUTO_MAX_WORKERS_CEILING);
+            (1, ceiling, initial)
         }
     };
 
