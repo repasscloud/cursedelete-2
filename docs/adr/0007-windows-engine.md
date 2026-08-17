@@ -6,7 +6,7 @@ Accepted.
 
 ## Context
 
-`README-CurseDelete2.md` section 5 names the Windows-specific primitives
+`README.md#appendix-original-productarchitecture-brief` section 5 names the Windows-specific primitives
 this engine must use (`FindFirstFileExW`/`FIND_FIRST_EX_LARGE_FETCH`,
 `FILE_DISPOSITION_INFO_EX`, `FILE_FLAG_OPEN_REPARSE_POINT`,
 `AdjustTokenPrivileges`, `SetNamedSecurityInfoW`), and sections 5.1-5.3,
@@ -134,7 +134,7 @@ honesty about residual risk for the POSIX engines:
   `FileDispositionInfoEx`/`DeleteFileW`/`RemoveDirectoryW` call removes
   the link, never whatever it points to. This is what makes "delete
   `C:\DeleteMe\junction`" safe even if `junction` points at
-  `D:\ImportantData` (`README-CurseDelete2.md` section 5.3's example).
+  `D:\ImportantData` (`README.md#appendix-original-productarchitecture-brief` section 5.3's example).
 - **Not protected**: the **ancestor chain**. Every path this crate hands
   to a Win32 call is a `PathBuf` re-resolved from the root on every call
   (via `to_verbatim`), not a chain of already-open directory handles the
@@ -226,7 +226,7 @@ Restart Manager's own graceful-shutdown mechanism, `RmShutdown`, only
 *asks* a process to close via `WM_QUERYENDSESSION` -- a message most
 non-GUI processes and virtually all services never answer. This engine
 terminates the identified holder directly via `OpenProcess`/
-`TerminateProcess` instead, which `README-CurseDelete2.md` section 12.1's
+`TerminateProcess` instead, which `README.md#appendix-original-productarchitecture-brief` section 12.1's
 own conceptual flow diagram supports (it goes straight from "identify lock
 holder" to "terminate process", with no `RmShutdown` step drawn in). This
 is recorded here as the documented interpretation the product brief asks

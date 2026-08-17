@@ -182,7 +182,7 @@ its own validation target this pass didn't have access to:
 
 ## Benchmarks are intentionally not part of any release or CI gate
 
-`README-CurseDelete2.md` describes a benchmark suite (`tests/benchmark/` in
+`README.md#appendix-original-productarchitecture-brief` describes a benchmark suite (`tests/benchmark/` in
 its sketched layout, section 21 "Benchmark Suite"), but no runnable
 benchmark harness exists in the repository yet. Per this task's brief,
 performance benchmarking must never gate CI/release on shared or virtual
