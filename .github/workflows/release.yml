@@ -53,6 +53,12 @@ jobs:
       fail-fast: false
       matrix:
         target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
+    env:
+      # `secrets` cannot be referenced directly in a step `if:` (GitHub
+      # rejects it at workflow-parse time with "Unrecognized named-value:
+      # 'secrets'"), so the presence check is done here in `env:`, where
+      # `secrets` access is allowed, and the step below reads this instead.
+      HAS_WINDOWS_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -88,7 +94,7 @@ jobs:
       # would go (signtool.exe ships with the Windows SDK already present
       # on windows-latest runners).
       - name: Authenticode sign (placeholder -- inactive until secrets exist)
-        if: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+        if: ${{ env.HAS_WINDOWS_CERT == 'true' }}
         shell: bash
         run: |
           echo "::error::WINDOWS_CERTIFICATE is set but Authenticode signing is not implemented in this workflow yet. Implement the signtool.exe invocation here (see docs/RELEASE.md) before relying on this secret, or unset it."
@@ -184,6 +190,10 @@ jobs:
       fail-fast: false
       matrix:
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    env:
+      # See the matching comment on build-windows' HAS_WINDOWS_CERT: `secrets`
+      # cannot be referenced directly in a step `if:`.
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -208,7 +218,7 @@ jobs:
       # APPLE_TEAM_ID, APPLE_ID, APPLE_APP_PASSWORD) and where the
       # `codesign` + `xcrun notarytool` invocations would go.
       - name: Codesign & notarize (placeholder -- inactive until secrets exist)
-        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        if: ${{ env.HAS_APPLE_CERT == 'true' }}
         shell: bash
         run: |
           echo "::error::APPLE_CERTIFICATE is set but codesigning/notarization is not implemented in this workflow yet. Implement the codesign/notarytool invocation here (see docs/RELEASE.md) before relying on this secret, or unset it."
