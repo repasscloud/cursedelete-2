@@ -119,68 +119,75 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  build-linux:
-    name: build (${{ matrix.target }})
-    needs: check-version
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
-      - name: cargo build --release (native x86_64)
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: cargo build --release --locked --target ${{ matrix.target }} -p cursdel-cli
-
-      # aarch64-unknown-linux-gnu: built with `cross` (cross-rs), not a
-      # manually apt-installed cross toolchain. `cross` runs the build
-      # inside a pre-built Docker image with a matched aarch64-linux-gnu C
-      # toolchain and glibc sysroot already configured, which matters here
-      # because `ring` (transitively, via ureq's TLS backend in
-      # cursdel-license) compiles C/assembly in its build.rs -- a mismatched
-      # sysroot from a hand-rolled `apt-get install gcc-aarch64-linux-gnu`
-      # setup can produce a binary that links fine but misbehaves against
-      # the actual glibc on real ARM64 Linux hardware. (ci.yml's
-      # cross-check job uses the lighter apt-based approach instead,
-      # because it only needs `cargo check` -- a type-check, not a binary
-      # meant to ship.)
-      - name: Install cross
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-
-      - name: cross build --release --target aarch64-unknown-linux-gnu
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: cross build --release --locked --target ${{ matrix.target }} -p cursdel-cli
-
-      - name: Package
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${{ needs['check-version'].outputs.version }}"
-          target="${{ matrix.target }}"
-          stage="cursdel-${version}-${target}"
-          mkdir -p "dist/${stage}"
-          cp "target/${target}/release/cursdel" "dist/${stage}/"
-          cp LICENSE "dist/${stage}/"
-          cp README.md "dist/${stage}/README.md"
-          tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: cursdel-${{ needs['check-version'].outputs.version }}-${{ matrix.target }}
-          path: dist/*.tar.gz
-          if-no-files-found: error
-          retention-days: 7
+  # --- Linux build temporarily disabled ---
+  # aarch64-unknown-linux-gnu fails to link ("undefined reference to
+  # `statx`") even with Cross.toml pinning the cross-rs `main` image --
+  # still being investigated. Commented out (not deleted) so this release
+  # can ship Windows/macOS only in the meantime; the `release` job's
+  # `needs:` below has build-linux removed to match. Re-enable both once
+  # the linux build is fixed.
+  # build-linux:
+  #   name: build (${{ matrix.target }})
+  #   needs: check-version
+  #   runs-on: ubuntu-latest
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+  #   steps:
+  #     - uses: actions/checkout@v7
+  #     - uses: dtolnay/rust-toolchain@stable
+  #       with:
+  #         targets: ${{ matrix.target }}
+  #     - uses: Swatinem/rust-cache@v2
+  #       with:
+  #         key: ${{ matrix.target }}
+  #
+  #     - name: cargo build --release (native x86_64)
+  #       if: matrix.target == 'x86_64-unknown-linux-gnu'
+  #       run: cargo build --release --locked --target ${{ matrix.target }} -p cursdel-cli
+  #
+  #     # aarch64-unknown-linux-gnu: built with `cross` (cross-rs), not a
+  #     # manually apt-installed cross toolchain. `cross` runs the build
+  #     # inside a pre-built Docker image with a matched aarch64-linux-gnu C
+  #     # toolchain and glibc sysroot already configured, which matters here
+  #     # because `ring` (transitively, via ureq's TLS backend in
+  #     # cursdel-license) compiles C/assembly in its build.rs -- a mismatched
+  #     # sysroot from a hand-rolled `apt-get install gcc-aarch64-linux-gnu`
+  #     # setup can produce a binary that links fine but misbehaves against
+  #     # the actual glibc on real ARM64 Linux hardware. (ci.yml's
+  #     # cross-check job uses the lighter apt-based approach instead,
+  #     # because it only needs `cargo check` -- a type-check, not a binary
+  #     # meant to ship.)
+  #     - name: Install cross
+  #       if: matrix.target == 'aarch64-unknown-linux-gnu'
+  #       uses: taiki-e/install-action@v2
+  #       with:
+  #         tool: cross
+  #
+  #     - name: cross build --release --target aarch64-unknown-linux-gnu
+  #       if: matrix.target == 'aarch64-unknown-linux-gnu'
+  #       run: cross build --release --locked --target ${{ matrix.target }} -p cursdel-cli
+  #
+  #     - name: Package
+  #       shell: bash
+  #       run: |
+  #         set -euo pipefail
+  #         version="${{ needs['check-version'].outputs.version }}"
+  #         target="${{ matrix.target }}"
+  #         stage="cursdel-${version}-${target}"
+  #         mkdir -p "dist/${stage}"
+  #         cp "target/${target}/release/cursdel" "dist/${stage}/"
+  #         cp LICENSE "dist/${stage}/"
+  #         cp README.md "dist/${stage}/README.md"
+  #         tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
+  #
+  #     - uses: actions/upload-artifact@v7
+  #       with:
+  #         name: cursdel-${{ needs['check-version'].outputs.version }}-${{ matrix.target }}
+  #         path: dist/*.tar.gz
+  #         if-no-files-found: error
+  #         retention-days: 7
 
   build-macos:
     name: build (${{ matrix.target }})
@@ -246,7 +253,9 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [check-version, build-windows, build-linux, build-macos]
+    # build-linux temporarily removed -- see the commented-out build-linux
+    # job above for why. Add it back here once that job is re-enabled.
+    needs: [check-version, build-windows, build-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
