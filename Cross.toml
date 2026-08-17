@@ -1,0 +1,12 @@
+# `cross`'s default image for this target is pinned to the tag matching the
+# installed `cross` version (0.2.5 as of this writing), which predates
+# cross-rs's move to an Ubuntu 24.04 base image. That old image's glibc
+# predates statx(2) support (glibc >= 2.28), so linking cursdel-linux --
+# which calls `libc::statx` directly, see crates/cursdel-linux/src/dirlist.rs
+# -- fails with "undefined reference to `statx`" even though the crate
+# already handles statx being unavailable *at runtime* (ENOSYS fallback to
+# fstatat). Pinning to the `main` tag picks up cross-rs's current
+# Ubuntu 24.04-based image, which has a modern-enough glibc for the symbol
+# to link.
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
