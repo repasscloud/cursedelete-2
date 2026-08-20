@@ -6,7 +6,7 @@ Accepted.
 
 ## Context
 
-`README-CurseDelete2.md` section 6 names the Linux-specific primitives this
+`README.md#appendix-original-productarchitecture-brief` section 6 names the Linux-specific primitives this
 engine should use (`openat()`, `unlinkat()`, `fstatat()`, `getdents64()`
 "where benchmarking justifies it", `chmod()`/`fchmodat()`), and requires
 accounting for Unix permission semantics -- deletion authority comes from
@@ -199,7 +199,7 @@ call succeeds. This is exercised directly by
 - `--kill-locks` on Linux has no external-binary dependency, unlike the
   macOS engine -- a real operational advantage for container/minimal-server
   deployments, which is a meaningful share of CurseDelete's intended
-  automation use case per `README-CurseDelete2.md` section 25.3.
+  automation use case per `README.md#appendix-original-productarchitecture-brief` section 25.3.
 - If `--destroy`-mode throughput benchmarking ever identifies
   `readdir`-buffering overhead as a bottleneck on very large trees, the
   `getdents64` decision above is the one to revisit first, with numbers.

@@ -107,7 +107,7 @@ code.
 on synthetic trees, see [docs/BENCHMARKS.md](../docs/BENCHMARKS.md) for
 real -- not fabricated -- results captured with it) exists at the
 workspace root. `tests/integration/` and `tests/destructive/`, referenced
-in the original architecture brief (`README-CurseDelete2.md`) as
+in the original architecture brief (`README.md#appendix-original-productarchitecture-brief`) as
 suggested locations for further destructive/integration coverage, remain
 empty placeholders beyond what `crates/cursdel-cli/tests/` and
 `crates/cursdel-license/tests/fixtures/` already provide -- the CLI

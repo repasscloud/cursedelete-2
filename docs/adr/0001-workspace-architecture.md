@@ -6,7 +6,7 @@ Accepted.
 
 ## Context
 
-`README-CurseDelete2.md` requires shared orchestration with native,
+`README.md#appendix-original-productarchitecture-brief` requires shared orchestration with native,
 platform-specific deletion engines for Windows, Linux, and macOS, rather
 than a lowest-common-denominator abstraction. The previous implementations
 inform this decision:
@@ -55,7 +55,7 @@ A Cargo workspace with:
 
 ### Shared tree walker
 
-A further refinement beyond the layout `README-CurseDelete2.md` sketches:
+A further refinement beyond the layout `README.md#appendix-original-productarchitecture-brief` sketches:
 the tricky, easy-to-get-wrong part of enumeration -- explicit-stack
 traversal (no recursion, so arbitrarily deep trees can't blow the call
 stack), `DirId` allocation, and emitting `DirectoryComplete` events in a

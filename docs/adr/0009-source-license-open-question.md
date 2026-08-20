@@ -21,14 +21,14 @@ report a license with no basis in the actual repository content) and,
 more importantly, a substantive business question that a Rust rewrite
 should not silently paper over: **the product has a commercial licensing
 model** (Community free / Education free / Business and Enterprise paid,
-per `README-CurseDelete2.md` §§24-27 and `docs/LICENSING.md`). If the
+per `README.md#appendix-original-productarchitecture-brief` §§24-27 and `docs/LICENSING.md`). If the
 *source code itself* is distributed under a permissive OSI license like
 Apache-2.0 or MIT, that license's own grant of rights legally permits
 anyone to compile the source and use it for any purpose, including
 unrestricted commercial use, completely independent of `cursdel-license`'s
 activation/entitlement system -- which would make the Business/Enterprise
 "commercial use" restriction legally unenforceable against anyone willing
-to build from source. `README-CurseDelete2.md`'s own guidance points at
+to build from source. `README.md#appendix-original-productarchitecture-brief`'s own guidance points at
 exactly this tension: "Commercial restrictions can be legal/licensing
 terms where technical enforcement would make the tool worse" -- i.e. the
 intent is that commercial-use restriction is a *license terms* matter,

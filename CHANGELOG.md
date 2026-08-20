@@ -18,7 +18,7 @@ source of truth; see `docs/RELEASE.md` for how a release is cut).
   (`cursdel-windows`, `cursdel-linux`, `cursdel-macos`), licensing
   (`cursdel-license`, `cursdel-policy`), and the `cursdel` CLI
   (`cursdel-cli`). See `docs/adr/` for the architectural decisions behind
-  the crate split and `README-CurseDelete2.md` for the product brief this
+  the crate split and `README.md#appendix-original-productarchitecture-brief` for the product brief this
   rewrite implements.
 - CI (`.github/workflows/ci.yml`): formatting, clippy, `cargo test` across
   Windows/Linux/macOS, cross-target type-checking for the ARM64 shipping

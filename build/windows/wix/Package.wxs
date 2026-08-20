@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="CurseDelete"
+      Manufacturer="RePassCloud"
+      Version="__VERSION__"
+      Language="1033"
+      Scope="perMachine"
+      UpgradeCode="A690B423-3227-47F0-B898-734A1606B704">
+
+    <SummaryInformation
+        Description="CurseDelete command-line file deletion utility"
+        Manufacturer="RePassCloud" />
+
+    <MajorUpgrade
+        DowngradeErrorMessage="A newer version of CurseDelete is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!--
+      Public MSI properties:
+        INSTALLFOLDER  - Override installation path.
+        DEPLOYMENTKEY  - Optional key used for post-install enrollment.
+
+      Example:
+        msiexec /i CurseDelete.msi /qn INSTALLFOLDER="D:\Apps\CurseDelete" DEPLOYMENTKEY="abcd1234"
+    -->
+    <Property Id="DEPLOYMENTKEY" Hidden="yes" Secure="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="RePassCloudFolder" Name="RePassCloud">
+        <Directory Id="INSTALLFOLDER" Name="CurseDelete">
+          <Component Id="MainPayload" Guid="*">
+            <File Id="CursdelExe" Source="__PAYLOAD_DIR__\cursdel.exe" KeyPath="yes" />
+            <File Id="ReadmeFile" Source="__PAYLOAD_DIR__\README.md" />
+            <File Id="ChangelogFile" Source="__PAYLOAD_DIR__\CHANGELOG.md" />
+            <File Id="LicenseFile" Source="__PAYLOAD_DIR__\LICENSE" />
+
+            <!-- Add the INSTALL DIRECTORY (not the exe itself) to machine PATH. -->
+            <Environment
+                Id="AddInstallFolderToMachinePath"
+                Name="PATH"
+                Action="set"
+                Part="last"
+                System="yes"
+                Permanent="no"
+                Value="[INSTALLFOLDER]" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="CurseDelete" Level="1">
+      <ComponentRef Id="MainPayload" />
+    </Feature>
+
+    <!--
+      Optional post-install enrollment.
+      Hidden target prevents DEPLOYMENTKEY appearing in MSI action logging.
+    -->
+    <SetProperty
+        Id="EnrollDeploymentKey"
+        Value="&quot;[#CursdelExe]&quot; license enroll --deploymentkey=&quot;[DEPLOYMENTKEY]&quot;"
+        Before="EnrollDeploymentKey"
+        Sequence="execute"
+        Condition="NOT Installed AND DEPLOYMENTKEY &lt;&gt; &quot;&quot;" />
+
+    <CustomAction
+        Id="EnrollDeploymentKey"
+        BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+        DllEntry="WixSilentExec"
+        Execute="deferred"
+        Impersonate="no"
+        Return="check"
+        HideTarget="yes" />
+
+    <!--
+      Grant BUILTIN\Users Modify on JSON files that exist after enrollment.
+      This intentionally does NOT make the whole Program Files directory writable.
+      SID S-1-5-32-545 = BUILTIN\Users, avoiding localisation issues.
+    -->
+    <SetProperty
+        Id="SetJsonAcl"
+        Value="&quot;[%ComSpec]&quot; /d /s /c if exist &quot;[INSTALLFOLDER]*.json&quot; icacls &quot;[INSTALLFOLDER]*.json&quot; /grant *S-1-5-32-545:(M) /C"
+        Before="SetJsonAcl"
+        Sequence="execute"
+        Condition="NOT Installed" />
+
+    <CustomAction
+        Id="SetJsonAcl"
+        BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+        DllEntry="WixSilentExec"
+        Execute="deferred"
+        Impersonate="no"
+        Return="check" />
+
+    <InstallExecuteSequence>
+      <Custom
+          Action="EnrollDeploymentKey"
+          After="InstallFiles"
+          Condition="NOT Installed AND DEPLOYMENTKEY &lt;&gt; &quot;&quot;" />
+      <Custom
+          Action="SetJsonAcl"
+          Before="InstallFinalize"
+          Condition="NOT Installed" />
+    </InstallExecuteSequence>
+
+  </Package>
+</Wix>

@@ -6,7 +6,7 @@ Accepted.
 
 ## Context
 
-`README-CurseDelete2.md` requires two distinct guarantees that are easy to
+`README.md#appendix-original-productarchitecture-brief` requires two distinct guarantees that are easy to
 conflate but must be kept separate:
 
 1. A destructive *target argument* must never be able to resolve to a

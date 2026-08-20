@@ -2,7 +2,7 @@
 
 These records document the decisions made while implementing CurseDelete 2,
 including places where the implementation refines or deviates from
-`README-CurseDelete2.md` (the original product/architecture brief) and why.
+`README.md#appendix-original-productarchitecture-brief` (the original product/architecture brief) and why.
 Read them when you need the reasoning behind a design choice, not just the
 choice itself — the user-facing docs in `docs/` link back to specific ADRs
 wherever a decision needs justification rather than restatement.
