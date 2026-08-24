@@ -1,9 +1,20 @@
 //! Platform-conventional storage locations for the licence file and
-//! activation credentials, per the product brief's explicit choices:
+//! activation credentials:
 //!
-//! - Windows: `%LOCALAPPDATA%\RePassCloud\CurseDelete\`
-//! - Linux: `~/.config/cursedelete/` (XDG, honouring `XDG_CONFIG_HOME`)
-//! - macOS: `~/Library/Application Support/CurseDelete/`
+//! - Windows: `%LOCALAPPDATA%\RePassCloud\CurseDelete-2\`
+//! - Linux: `~/.config/cursedelete-2/` (XDG, honouring `XDG_CONFIG_HOME`)
+//! - macOS: `~/Library/Application Support/CurseDelete-2/`
+//!
+//! Named `CurseDelete-2` (matching this repository, `cursedelete-2`, and
+//! the product's "CurseDelete 2" branding -- see `README.md`'s Release
+//! Philosophy section) rather than plain `CurseDelete`, so this crate's
+//! licence state can never collide with a machine that also has the
+//! separate, pre-rewrite C# CurseDelete installed. Any machine that
+//! activated under this crate's earlier, unqualified `CurseDelete` path
+//! (v2.0.0's original location) needs to re-activate/re-enroll once on
+//! this path -- deliberate, since the product has no wide install base
+//! yet and disambiguating the two products' state going forward matters
+//! more than preserving that short-lived path.
 //!
 //! The activation token is a bearer credential (see
 //! `LICENSING-INTEGRATION.md` §6.1: "treat it like a password"). It is
@@ -55,7 +66,16 @@ pub fn machine_wide_paths() -> LicensePaths {
 /// against an isolated temporary directory instead of real, root-owned
 /// machine state (which would be both unwritable by an unprivileged test
 /// runner and actively wrong to mutate from a test). Not documented as a
-/// user-facing configuration knob.
+/// user-facing configuration knob, and -- since an unprivileged caller
+/// could otherwise point this at a directory it already owns to make
+/// `enroll` report machine-wide success while no other account can
+/// actually see the result, bypassing the whole point of the
+/// administrator/root preflight in [`ensure_machine_wide_writable`] --
+/// compiled in only for `#[cfg(debug_assertions)]` builds (`cargo build`/
+/// `cargo test` without `--release`), never for the `--release` profile
+/// this product actually ships (see `[profile.release]` in the workspace
+/// `Cargo.toml` and `docs/RELEASE.md`).
+#[cfg(debug_assertions)]
 const MACHINE_DIR_OVERRIDE_ENV_VAR: &str = "CURSDEL_MACHINE_LICENSE_DIR_FOR_TESTS";
 
 // Each `#[cfg(...)]` block below is the sole surviving statement in its
@@ -66,6 +86,7 @@ const MACHINE_DIR_OVERRIDE_ENV_VAR: &str = "CURSDEL_MACHINE_LICENSE_DIR_FOR_TEST
 // be last.
 #[allow(clippy::needless_return)]
 fn machine_wide_dir() -> PathBuf {
+    #[cfg(debug_assertions)]
     if let Some(dir) = std::env::var_os(MACHINE_DIR_OVERRIDE_ENV_VAR) {
         return PathBuf::from(dir);
     }
@@ -75,19 +96,19 @@ fn machine_wide_dir() -> PathBuf {
         let program_data = std::env::var_os("PROGRAMDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("C:\\ProgramData"));
-        return program_data.join("RePassCloud").join("CurseDelete");
+        return program_data.join("CurseDelete-2");
     }
     #[cfg(target_os = "macos")]
     {
-        return PathBuf::from("/Library/Application Support/RePassCloud/CurseDelete");
+        return PathBuf::from("/Library/Application Support/CurseDelete-2");
     }
     #[cfg(target_os = "linux")]
     {
-        return PathBuf::from("/var/lib/repasscloud/cursedelete");
+        return PathBuf::from("/var/lib/cursedelete-2");
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
-        PathBuf::from("/var/lib/repasscloud/cursedelete")
+        PathBuf::from("/var/lib/cursedelete-2")
     }
 }
 
@@ -122,13 +143,53 @@ pub fn save_machine_license_file(
 /// Saves activation credentials (a bearer token) to a machine-wide
 /// location, owner-only -- same secrecy requirement as the per-user
 /// activation file, just rooted under the machine-wide directory instead.
+///
+/// Unlike the per-user path (which inherits the profile's already
+/// owner-restricted NTFS ACLs), `%PROGRAMDATA%` is normally readable by
+/// every local account -- `write_with_mode`'s Unix `0600` argument has no
+/// Windows equivalent via a plain file write, so on Windows this also
+/// applies an explicit ACL restricting the file to Administrators and
+/// SYSTEM after writing it, closing what would otherwise be a real gap: a
+/// non-admin local user reading the machine's bearer token straight out
+/// of a world-readable ProgramData file and using it to call the licence
+/// server's `deactivate`/`refresh` endpoints as this machine.
 pub fn save_machine_activation_credentials(
     paths: &LicensePaths,
     creds: &ActivationCredentials,
 ) -> io::Result<()> {
     let json = serde_json::to_string_pretty(creds)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    write_with_mode(&paths.activation_credentials_file, json.as_bytes(), 0o600)
+    write_with_mode(&paths.activation_credentials_file, json.as_bytes(), 0o600)?;
+    #[cfg(target_os = "windows")]
+    restrict_to_administrators_and_system(&paths.activation_credentials_file)?;
+    Ok(())
+}
+
+/// Removes inherited ACEs and grants Full Control to only BUILTIN\Administrators
+/// (`S-1-5-32-544`) and SYSTEM (`S-1-5-18`) on `path`, via the `icacls`
+/// tool that ships with every supported Windows version. Well-known SIDs
+/// are used (rather than the `Administrators`/`SYSTEM` names) to avoid
+/// localisation issues, mirroring the same well-known-SID practice already
+/// used for the Windows installer's own ACL handling (see
+/// `build/windows/wix/Package.wxs`).
+#[cfg(target_os = "windows")]
+fn restrict_to_administrators_and_system(path: &Path) -> io::Result<()> {
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .arg("/inheritance:r")
+        .arg("/grant:r")
+        .arg("*S-1-5-32-544:F")
+        .arg("/grant:r")
+        .arg("*S-1-5-18:F")
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "icacls failed to restrict permissions on {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(())
 }
 
 fn license_dir() -> PathBuf {
@@ -138,22 +199,22 @@ fn license_dir() -> PathBuf {
             return base
                 .data_local_dir()
                 .join("RePassCloud")
-                .join("CurseDelete");
+                .join("CurseDelete-2");
         }
         #[cfg(target_os = "linux")]
         {
-            return base.config_dir().join("cursedelete");
+            return base.config_dir().join("cursedelete-2");
         }
         #[cfg(target_os = "macos")]
         {
-            return base.data_dir().join("CurseDelete");
+            return base.data_dir().join("CurseDelete-2");
         }
         #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
         {
-            return base.config_dir().join("cursedelete");
+            return base.config_dir().join("cursedelete-2");
         }
     }
-    PathBuf::from(".cursedelete")
+    PathBuf::from(".cursedelete-2")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

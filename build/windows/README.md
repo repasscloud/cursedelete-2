@@ -111,21 +111,22 @@ MSIX cannot implement the MSI/Inno arbitrary `/deploymentkey` post-install
 workflow. Enroll after installation:
 
 ```powershell
-cursdel.exe license enroll --deploymentkey=abcd1234
+cursdel.exe license enroll --deployment-key=abcd1234
 ```
 
-## JSON ACL note
+## Machine-wide license storage and ACLs
 
-The MSI and Inno installers run:
-
-```text
-icacls "<install-dir>\*.json" /grant BUILTIN\Users:(M)
-```
-
-after optional enrollment, so JSON files that exist at that time receive
-machine-wide Users Modify permission.
-
-Windows ACL inheritance cannot automatically apply a different ACL based on a
-future file's extension. If CurseDelete creates additional JSON files later,
-the application should set that ACL when creating them, or mutable machine
-state should be moved to `%ProgramData%\RePassCloud\CurseDelete`.
+`cursdel license enroll` (whether invoked directly, via the MSI's
+`DEPLOYMENTKEY` property, or via the Inno installer's `/deploymentkey`
+switch) writes `license.json` and `activation.json` to
+`%ProgramData%\CurseDelete-2\` -- **not** the install directory
+(`{app}`/`INSTALLFOLDER`). `cursdel` applies its own permissions when
+writing those files: `license.json` inherits `%ProgramData%`'s normal
+Users-readable ACL (any local account running `cursdel` needs to read it),
+while `activation.json` -- the bearer credential -- is explicitly
+restricted to `BUILTIN\Administrators` and `SYSTEM` via `icacls` (see
+`cursdel_license::store::save_machine_activation_credentials`). Earlier
+revisions of this installer applied their own `icacls ... /grant
+BUILTIN\Users:(M)` step targeting the install directory; that step never
+actually matched where the JSON files are written and has been removed --
+`cursdel` itself is now the single source of truth for these permissions.

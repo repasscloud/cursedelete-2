@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use cursdel_core::exit_code::ExitCode;
 use cursdel_license::client::{server_base_url, ClientError, LicenseServerClient};
 use cursdel_license::store::{self, ActivationCredentials, LicensePaths};
-use cursdel_license::{device, ProductEntitlement, Secret, VerifiedLicense};
+use cursdel_license::{device, LicenseScope, Resolution, Secret};
 use cursdel_policy::Capabilities;
 
 use crate::args::LicenseAction;
@@ -42,41 +42,29 @@ pub fn run(action: LicenseAction) -> ExitCode {
     }
 }
 
-/// Which storage scope an on-disk licence/activation pair was found in.
-/// Deployment Key enrollment always writes [`Scope::Machine`]; manual
-/// `activate`/`import` always write [`Scope::User`]. `status`, `refresh`,
-/// and `deactivate` need to know which one is actually present so they
-/// operate on the right files without requiring the caller to remember
-/// how this machine was set up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Scope {
-    Machine,
-    User,
-}
-
-impl Scope {
-    fn label(self) -> &'static str {
-        match self {
-            Scope::Machine => "machine-wide (Deployment Key enrollment)",
-            Scope::User => "user",
-        }
+fn scope_label(scope: LicenseScope) -> &'static str {
+    match scope {
+        LicenseScope::Machine => "machine-wide (Deployment Key enrollment)",
+        LicenseScope::User => "user",
     }
 }
 
 /// Resolves which storage scope has activation credentials present,
-/// preferring machine-wide over user scope. This is a narrow, local
-/// version of the full machine -> user -> Community precedence that
-/// belongs to the separate machine-wide storage/resolution work; it only
-/// needs to decide which single `LicensePaths` the `license` subcommands
-/// below should read from and write back to.
-fn resolve_scope() -> Option<(Scope, LicensePaths)> {
+/// preferring machine-wide over user scope, for `refresh`/`deactivate`
+/// (which need to know which single `LicensePaths` holds the bearer
+/// credential to operate on -- a question distinct from
+/// [`cursdel_license::resolve_active_license`]'s "which licence is
+/// currently active", since a refresh's whole point is to renew a licence
+/// whose *lease* has expired, which `resolve_active_license` would
+/// correctly report as `Invalid` rather than `Active`).
+fn resolve_credential_scope() -> Option<(LicenseScope, LicensePaths)> {
     let machine_paths = store::machine_wide_paths();
     if store::load_activation_credentials(&machine_paths)
         .ok()
         .flatten()
         .is_some()
     {
-        return Some((Scope::Machine, machine_paths));
+        return Some((LicenseScope::Machine, machine_paths));
     }
     let user_paths = store::default_paths();
     if store::load_activation_credentials(&user_paths)
@@ -84,63 +72,37 @@ fn resolve_scope() -> Option<(Scope, LicensePaths)> {
         .flatten()
         .is_some()
     {
-        return Some((Scope::User, user_paths));
+        return Some((LicenseScope::User, user_paths));
     }
     None
 }
 
-/// Resolves the effective capability set for the current machine: a
-/// verified, currently-valid licence's entitlement, or
-/// [`Capabilities::community`] if there is none, it failed verification,
-/// or it has expired. Never fails the caller -- an invalid licence must
-/// never crash `cursdel`, only fall back to the free tier.
+/// Resolves the effective capability set for the current machine via
+/// [`cursdel_license::resolve_active_license`]'s machine -> user ->
+/// Community precedence. Never fails the caller -- an invalid licence
+/// (at either scope) must never crash `cursdel`, only fall back to the
+/// free tier; see that function's own documentation for why an invalid
+/// machine-wide licence still does not fall through to a user licence.
 pub fn current_capabilities() -> Capabilities {
-    match load_and_validate() {
-        Some((_, entitlement, _)) => Capabilities::from_entitlement(&entitlement),
-        None => Capabilities::community(),
+    match cursdel_license::resolve_active_license(cursdel_license::PRODUCT_CODE) {
+        Resolution::Active(resolved) => Capabilities::from_entitlement(&resolved.entitlement),
+        Resolution::Invalid { .. } | Resolution::Community => Capabilities::community(),
     }
-}
-
-/// Checks machine-wide storage before per-user storage, since a
-/// Deployment Key-enrolled machine's license is meant to apply to every
-/// account on it. This is a narrow, local stand-in for the full
-/// machine -> user -> Community precedence, which belongs to the separate
-/// machine-wide storage/resolution work.
-fn load_and_validate() -> Option<(VerifiedLicense, ProductEntitlement, Scope)> {
-    for (scope, paths) in [
-        (Scope::Machine, store::machine_wide_paths()),
-        (Scope::User, store::default_paths()),
-    ] {
-        let Some(license_json) = store::load_license_file(&paths).ok().flatten() else {
-            continue;
-        };
-        let Ok(verified) = cursdel_license::verify(&license_json) else {
-            continue;
-        };
-        let Ok(entitlement) = cursdel_license::validate_product(
-            &verified,
-            cursdel_license::PRODUCT_CODE,
-            None,
-            None,
-            None,
-        ) else {
-            continue;
-        };
-        return Some((verified, entitlement, scope));
-    }
-    None
 }
 
 fn status() -> ExitCode {
     println!("CurseDelete License Status\n");
-    match load_and_validate() {
-        Some((verified, entitlement, scope)) => {
+    match cursdel_license::resolve_active_license(cursdel_license::PRODUCT_CODE) {
+        Resolution::Active(resolved) => {
+            let verified = &resolved.verified;
+            let entitlement = &resolved.entitlement;
             println!("License ID: {}", verified.data.license_id);
             println!("Customer:   {}", verified.data.customer);
             println!("Edition:    {}", entitlement.edition);
             println!("Type:       {}", entitlement.license_type);
             println!("Seats:      {}", entitlement.seats);
-            println!("Scope:      {}", scope.label());
+            println!("Scope:      {}", scope_label(resolved.scope));
+            println!("Path:       {}", resolved.paths.license_file.display());
             if let Some(expires_at) = entitlement.expires_at {
                 println!("Expires:    {expires_at}");
             }
@@ -151,7 +113,33 @@ fn status() -> ExitCode {
                 );
             }
         }
-        None => {
+        Resolution::Invalid {
+            scope,
+            paths,
+            error,
+        } => {
+            // Fail-closed and visible: a broken higher-priority licence
+            // is reported plainly rather than silently treated as if it
+            // weren't there, per the machine-wide resolution contract --
+            // and it is never bypassed in favour of a lower-priority
+            // scope, so there is no "falling back to the user licence"
+            // step to report here even if one happens to exist on disk.
+            println!("License scope: {} (invalid)", scope_label(scope));
+            println!("License path:  {}", paths.license_file.display());
+            println!("Problem:       {error}");
+            println!();
+            println!("Running with Community capabilities until this is resolved.");
+            if scope == LicenseScope::Machine {
+                println!(
+                    "This machine-wide licence is not being bypassed in favour of any \
+                     per-user licence -- fix or re-enroll it, or contact your licence \
+                     administrator."
+                );
+            }
+        }
+        Resolution::Community => {
+            println!("License scope: Community");
+            println!();
             println!("No active license on this device -- running with Community capabilities.");
             println!();
             println!("Manual activation (License ID + Activation Code from your purchase email):");
@@ -262,7 +250,7 @@ fn import(license_file: &Path) -> ExitCode {
 }
 
 fn deactivate() -> ExitCode {
-    let Some((_scope, paths)) = resolve_scope() else {
+    let Some((_scope, paths)) = resolve_credential_scope() else {
         println!("No active activation found on this device.");
         return ExitCode::Success;
     };
@@ -303,7 +291,7 @@ fn deactivate() -> ExitCode {
 }
 
 fn refresh() -> ExitCode {
-    let Some((scope, paths)) = resolve_scope() else {
+    let Some((scope, paths)) = resolve_credential_scope() else {
         eprintln!("Error: no active activation to refresh on this device.");
         return ExitCode::LicenseRequired;
     };
@@ -333,10 +321,10 @@ fn refresh() -> ExitCode {
     ) {
         Ok(response) => {
             let save_result = match scope {
-                Scope::Machine => {
+                LicenseScope::Machine => {
                     store::save_machine_license_file(&paths, &response.signed_license)
                 }
-                Scope::User => store::save_license_file(&paths, &response.signed_license),
+                LicenseScope::User => store::save_license_file(&paths, &response.signed_license),
             };
             match save_result {
                 Ok(()) => {
@@ -419,22 +407,39 @@ fn enroll(
     let device = device::current();
     let paths = store::machine_wide_paths();
 
-    // Idempotency: a machine already enrolled with valid local state
-    // reports success without contacting the server, so re-running
+    // Idempotency: a machine already enrolled with valid, *paired* local
+    // state reports success without contacting the server, so re-running
     // `license enroll` (e.g. from an idempotent provisioning script)
-    // never consumes another seat.
+    // never consumes another seat. Requiring a matching activation.json
+    // (not just a verifiable license.json) matters: if a previous attempt
+    // saved the license but failed to save activation credentials (or was
+    // interrupted between the two writes), the machine has a signed
+    // licence but no bearer token to refresh/deactivate it with -- that is
+    // not "already enrolled", it's a stranded partial state that this
+    // check must retry (and the cleanup below this block prevents from
+    // occurring in the first place going forward).
     if let Some(license_json) = store::load_license_file(&paths).ok().flatten() {
         if let Ok(verified) = cursdel_license::verify(&license_json) {
-            if cursdel_license::validate_activation(&verified, Some(&device), None).is_ok()
-                && cursdel_license::validate_product(
-                    &verified,
-                    cursdel_license::PRODUCT_CODE,
-                    None,
-                    None,
-                    None,
-                )
-                .is_ok()
-            {
+            let activation_valid =
+                cursdel_license::validate_activation(&verified, Some(&device), None).is_ok()
+                    && cursdel_license::validate_product(
+                        &verified,
+                        cursdel_license::PRODUCT_CODE,
+                        None,
+                        None,
+                        None,
+                    )
+                    .is_ok();
+            let creds_match_this_license =
+                store::load_activation_credentials(&paths)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|creds| {
+                        verified.data.activation.as_ref().is_some_and(|activation| {
+                            activation.activation_id == creds.activation_id
+                        })
+                    });
+            if activation_valid && creds_match_this_license {
                 println!("This machine is already enrolled and its licence is valid.");
                 println!("License ID: {}", verified.data.license_id);
                 return ExitCode::Success;
@@ -500,8 +505,23 @@ fn enroll(
         mode: "online".to_string(),
     };
     if let Err(e) = store::save_machine_activation_credentials(&paths, &creds) {
+        // The signed licence is now on disk but its bearer credential
+        // isn't -- a licence-only state that `status` could otherwise
+        // mistake for a complete, active enrollment (it has no reason to
+        // check activation.json's presence) and that `refresh`/
+        // `deactivate` can't use. Remove it so this machine reverts
+        // cleanly to "not enrolled" and a retried `enroll` starts fresh
+        // rather than getting stuck seeing a signed licence it can never
+        // pair with credentials.
+        if let Err(cleanup_err) = store::remove_license_file(&paths) {
+            eprintln!(
+                "Warning: could not remove the now-orphaned machine-wide licence file at {}: {cleanup_err}",
+                paths.license_file.display()
+            );
+        }
         eprintln!(
-            "Error: could not write machine-wide activation credentials at {}: {e}",
+            "Error: could not write machine-wide activation credentials at {}: {e}\n\
+             Enrollment did not complete; re-run 'cursdel license enroll' to retry.",
             paths.activation_credentials_file.display()
         );
         return ExitCode::PrivilegeRequirementNotSatisfied;

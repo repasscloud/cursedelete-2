@@ -470,10 +470,16 @@ function Write-WixSource {
 
       Deferred, non-impersonated execution means this runs elevated after the
       application files have been installed.
+
+      `cursdel license enroll` writes license.json/activation.json to
+      %ProgramData%\CurseDelete-2\ (not INSTALLFOLDER) and applies its own
+      ACL to activation.json (Administrators/SYSTEM only, via icacls -- see
+      cursdel_license::store::save_machine_activation_credentials), so no
+      installer-side ACL step is needed here.
     -->
     <SetProperty
         Id="EnrollDeploymentKey"
-        Value="&quot;[#CursdelExe]&quot; license enroll --deploymentkey=&quot;[DEPLOYMENTKEY]&quot;"
+        Value="&quot;[#CursdelExe]&quot; license enroll --deployment-key=&quot;[DEPLOYMENTKEY]&quot;"
         Before="EnrollDeploymentKey"
         Sequence="execute" />
 
@@ -486,31 +492,11 @@ function Write-WixSource {
         Return="check"
         HideTarget="yes" />
 
-    <!-- Grant BUILTIN\Users Modify to JSON files that exist after enrollment. -->
-    <SetProperty
-        Id="SetJsonAcl"
-        Value="&quot;[%ComSpec]&quot; /d /s /c if exist &quot;[INSTALLFOLDER]*.json&quot; icacls &quot;[INSTALLFOLDER]*.json&quot; /grant *S-1-5-32-545:(M) /C"
-        Before="SetJsonAcl"
-        Sequence="execute" />
-
-    <CustomAction
-        Id="SetJsonAcl"
-        BinaryRef="Wix4UtilCA_`$(sys.BUILDARCHSHORT)"
-        DllEntry="WixSilentExec"
-        Execute="deferred"
-        Impersonate="no"
-        Return="check" />
-
     <InstallExecuteSequence>
       <Custom
           Action="EnrollDeploymentKey"
           After="InstallFiles"
           Condition="NOT Installed AND DEPLOYMENTKEY &lt;&gt; &quot;&quot;" />
-
-      <Custom
-          Action="SetJsonAcl"
-          After="EnrollDeploymentKey"
-          Condition="NOT Installed" />
     </InstallExecuteSequence>
 
   </Package>
@@ -570,11 +556,13 @@ Source: "$escapedPayload\CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "$escapedPayload\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Run]
-; Optional deployment enrollment after installation.
-Filename: "{app}\cursdel.exe"; Parameters: "license enroll --deploymentkey=""{code:GetDeploymentKey}"""; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; Check: HasDeploymentKey
-
-; Apply Users=Modify to JSON files created during enrollment.
-Filename: "{cmd}"; Parameters: "/d /s /c if exist ""{app}\*.json"" icacls ""{app}\*.json"" /grant *S-1-5-32-545:(M) /C"; Flags: runhidden waituntilterminated; Check: HasJsonFiles
+; Optional deployment enrollment after installation. `cursdel license
+; enroll` itself writes license.json/activation.json to
+; %ProgramData%\CurseDelete-2\ (not {app}) and applies its own, narrower
+; ACL to activation.json (Administrators/SYSTEM only, via icacls -- see
+; cursdel_license::store::save_machine_activation_credentials), so no
+; installer-side ACL step is needed here.
+Filename: "{app}\cursdel.exe"; Parameters: "license enroll --deployment-key=""{code:GetDeploymentKey}"""; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; Check: HasDeploymentKey
 
 [Code]
 const
@@ -625,16 +613,6 @@ end;
 function HasDeploymentKey: Boolean;
 begin
   Result := GetDeploymentKey('') <> '';
-end;
-
-function HasJsonFiles: Boolean;
-var
-  FindRec: TFindRec;
-begin
-  Result := FindFirst(ExpandConstant('{app}\*.json'), FindRec);
-
-  if Result then
-    FindClose(FindRec);
 end;
 
 function NormalizePathEntry(const Value: String): String;
@@ -1208,6 +1186,6 @@ Installer examples:
     Add-AppxPackage ".\CurseDelete-v$Version-win-x64.msix"
 
   MSIX deployment enrollment (run after install):
-    cursdel.exe license enroll --deploymentkey=abcd1234
+    cursdel.exe license enroll --deployment-key=abcd1234
 
 "@ -ForegroundColor Green

@@ -43,18 +43,17 @@ Source: "__PAYLOAD_DIR__\CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "__PAYLOAD_DIR__\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Run]
-; Optional deployment enrollment after installation.
+; Optional deployment enrollment after installation. `cursdel license
+; enroll` itself writes license.json/activation.json to
+; %ProgramData%\CurseDelete-2\ (not {app}) and applies its own, narrower
+; ACL to activation.json (Administrators/SYSTEM only, via icacls -- see
+; cursdel_license::store::save_machine_activation_credentials), so no
+; installer-side ACL step is needed here.
 Filename: "{app}\cursdel.exe"; \
-    Parameters: "license enroll --deploymentkey=""{code:GetDeploymentKey}"""; \
+    Parameters: "license enroll --deployment-key=""{code:GetDeploymentKey}"""; \
     WorkingDir: "{app}"; \
     Flags: runhidden waituntilterminated; \
     Check: HasDeploymentKey
-
-; Grant BUILTIN\Users Modify to JSON files created by the enrollment step.
-Filename: "{cmd}"; \
-    Parameters: "/d /s /c if exist ""{app}\*.json"" icacls ""{app}\*.json"" /grant *S-1-5-32-545:(M) /C"; \
-    Flags: runhidden waituntilterminated; \
-    Check: HasJsonFiles
 
 [Code]
 const
@@ -101,15 +100,6 @@ end;
 function HasDeploymentKey: Boolean;
 begin
   Result := GetDeploymentKey('') <> '';
-end;
-
-function HasJsonFiles: Boolean;
-var
-  FindRec: TFindRec;
-begin
-  Result := FindFirst(ExpandConstant('{app}\*.json'), FindRec);
-  if Result then
-    FindClose(FindRec);
 end;
 
 function NormalizePathEntry(const Value: String): String;
