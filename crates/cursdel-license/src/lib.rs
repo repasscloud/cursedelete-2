@@ -9,14 +9,18 @@ pub mod canonical_json;
 pub mod client;
 pub mod device;
 pub mod error;
+pub mod resolve;
 pub mod schema;
+pub mod secret;
 pub mod store;
 pub mod trusted_keys;
 pub mod verify;
 
 pub use device::LocalDeviceIdentity;
 pub use error::{SchemaError, ValidationError};
+pub use resolve::{resolve_active_license, LicenseScope, Resolution, ResolvedLicense};
 pub use schema::{ActivationData, DeviceBinding, LicenseData, ProductEntitlement};
+pub use secret::Secret;
 pub use verify::{validate_activation, validate_product, verify, verify_file, VerifiedLicense};
 
 /// The stable product code CurseDelete registers on the licence server and

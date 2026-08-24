@@ -142,4 +142,47 @@ pub enum LicenseAction {
     Deactivate,
     /// Renew the current online activation lease.
     Refresh,
+    /// Enroll this machine under an existing licence using a Deployment
+    /// Key, for unattended/automated provisioning (Intune, an RMM, a
+    /// golden image, a container entrypoint). This is a separate
+    /// mechanism from manual `activate`: a Deployment Key is an
+    /// enrollment credential, not a licence, and is never itself
+    /// persisted or displayed. Exactly one of --deployment-key,
+    /// --deployment-key-env, --deployment-key-file, or
+    /// --deployment-key-stdin is required.
+    Enroll {
+        /// The Deployment Key value directly. Convenient for interactive
+        /// use and testing; avoid this on shared/logged automation hosts
+        /// where process command lines may be visible to other users or
+        /// recorded (prefer --deployment-key-env or --deployment-key-file
+        /// there).
+        #[arg(
+            long,
+            value_name = "KEY",
+            conflicts_with_all = ["deployment_key_env", "deployment_key_file", "deployment_key_stdin"]
+        )]
+        deployment_key: Option<String>,
+        /// Read the Deployment Key from this environment variable, so it
+        /// never appears on the process command line.
+        #[arg(
+            long,
+            value_name = "ENV_VAR",
+            conflicts_with_all = ["deployment_key", "deployment_key_file", "deployment_key_stdin"]
+        )]
+        deployment_key_env: Option<String>,
+        /// Read the Deployment Key from this file (its contents, trimmed
+        /// of surrounding whitespace).
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with_all = ["deployment_key", "deployment_key_env", "deployment_key_stdin"]
+        )]
+        deployment_key_file: Option<PathBuf>,
+        /// Read the Deployment Key from stdin (one line, trimmed).
+        #[arg(
+            long,
+            conflicts_with_all = ["deployment_key", "deployment_key_env", "deployment_key_file"]
+        )]
+        deployment_key_stdin: bool,
+    },
 }

@@ -60,7 +60,7 @@
     -->
     <SetProperty
         Id="EnrollDeploymentKey"
-        Value="&quot;[#CursdelExe]&quot; license enroll --deploymentkey=&quot;[DEPLOYMENTKEY]&quot;"
+        Value="&quot;[#CursdelExe]&quot; license enroll --deployment-key=&quot;[DEPLOYMENTKEY]&quot;"
         Before="EnrollDeploymentKey"
         Sequence="execute"
         Condition="NOT Installed AND DEPLOYMENTKEY &lt;&gt; &quot;&quot;" />
@@ -75,34 +75,22 @@
         HideTarget="yes" />
 
     <!--
-      Grant BUILTIN\Users Modify on JSON files that exist after enrollment.
-      This intentionally does NOT make the whole Program Files directory writable.
-      SID S-1-5-32-545 = BUILTIN\Users, avoiding localisation issues.
+      No installer-side ACL step is needed for enrollment's JSON files:
+      `cursdel license enroll` writes them to %ProgramData%\CurseDelete-2\,
+      not [INSTALLFOLDER] -- so an ACL grant here would have targeted the
+      wrong directory entirely. `cursdel` itself already applies the
+      correct, narrower permissions when it writes those files (license.json
+      inherits ProgramData's normal Users-readable ACL; activation.json --
+      the bearer credential -- is explicitly restricted to Administrators
+      and SYSTEM via `icacls`, see `cursdel_license::store::save_machine_activation_credentials`),
+      so there is nothing left for this installer to grant.
     -->
-    <SetProperty
-        Id="SetJsonAcl"
-        Value="&quot;[%ComSpec]&quot; /d /s /c if exist &quot;[INSTALLFOLDER]*.json&quot; icacls &quot;[INSTALLFOLDER]*.json&quot; /grant *S-1-5-32-545:(M) /C"
-        Before="SetJsonAcl"
-        Sequence="execute"
-        Condition="NOT Installed" />
-
-    <CustomAction
-        Id="SetJsonAcl"
-        BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
-        DllEntry="WixSilentExec"
-        Execute="deferred"
-        Impersonate="no"
-        Return="check" />
 
     <InstallExecuteSequence>
       <Custom
           Action="EnrollDeploymentKey"
           After="InstallFiles"
           Condition="NOT Installed AND DEPLOYMENTKEY &lt;&gt; &quot;&quot;" />
-      <Custom
-          Action="SetJsonAcl"
-          Before="InstallFinalize"
-          Condition="NOT Installed" />
     </InstallExecuteSequence>
 
   </Package>

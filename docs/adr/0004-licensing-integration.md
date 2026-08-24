@@ -145,19 +145,78 @@ with the exact subpath components appended manually (not
 reproduce the asymmetric shape required -- an organisation subfolder on
 Windows but not on macOS):
 
-- Windows: `%LOCALAPPDATA%\RePassCloud\CurseDelete\`
-- Linux: `~/.config/cursedelete/` (XDG, honouring `XDG_CONFIG_HOME`)
-- macOS: `~/Library/Application Support/CurseDelete/`
+- Windows: `%LOCALAPPDATA%\RePassCloud\CurseDelete-2\`
+- Linux: `~/.config/cursedelete-2/` (XDG, honouring `XDG_CONFIG_HOME`)
+- macOS: `~/Library/Application Support/CurseDelete-2/`
+
+(Originally shipped without the `-2` suffix in v2.0.0; renamed alongside
+the machine-wide storage work below so this crate's license state can
+never collide with the separate, pre-rewrite C# CurseDelete
+implementation. A machine that activated under the original v2.0.0 path
+needs to re-activate once.)
+
+### Machine-wide storage and machine -> user -> Community resolution
+
+Deployment Key enrollment (`cursdel license enroll`, see
+`docs/LICENSING.md#unattended-enrollment-with-a-deployment-key`) needs a
+storage location shared by every account on the machine, not the per-user
+path above -- a machine activation represents the machine, not one of its
+user accounts. Added:
+
+- Windows: `%PROGRAMDATA%\CurseDelete-2\`
+- Linux: `/var/lib/cursedelete-2/`
+- macOS: `/Library/Application Support/CurseDelete-2/`
+
+No `RePassCloud` vendor subfolder on any platform here (unlike the
+per-user Windows path above) -- machine scope is deliberately the same
+shape across all three platforms, and this location has no equivalent
+pre-rewrite C# predecessor to stay shaped like.
+
+Resolution across the two scopes (`cursdel_license::resolve_active_license`)
+is machine -> user -> Community: the first scope with a present *and
+valid* license wins. Deliberately **not** simply "first present license,
+verify it, fall through to the next scope on failure" -- an invalid
+machine-scope license is reported as invalid (`license status` shows the
+scope, path, and problem) rather than silently bypassed in favour of a
+user-scope license that happens to still be around. Rationale: a
+Deployment Key can be revoked, or the machine's seat can be reclaimed,
+specifically to take a machine out of service; quietly reverting to
+whatever personal license was activated on it before enrollment (or left
+over from testing) would undermine that. Ordinary deletion still fails
+open to Community rather than crashing either way, consistent with this
+crate's broader "an invalid license must never break deletion" policy --
+the fail-closed behaviour is about *scope precedence*, not about denying
+service.
+
+`license refresh`/`deactivate` resolve which scope to operate on
+independently (via activation-credential presence, machine before user),
+since their job is to renew or clear credentials whose *license* may
+currently be reported invalid (an expired lease is exactly what `refresh`
+exists to fix) -- they must not require `resolve_active_license` to
+report `Active` first.
+
+Machine-scope `activation.json` (the bearer credential) needs stricter
+permissions than `%ProgramData%`'s default ACL provides on Windows
+(unlike the per-user path, which inherits the profile's already
+owner-restricted ACLs) -- `cursdel_license::store::save_machine_activation_credentials`
+applies an explicit `icacls` grant restricting it to
+`BUILTIN\Administrators` and `SYSTEM` after writing it. `license.json`
+is left world-readable (every local account running `cursdel` needs to
+resolve the machine license).
 
 ### Server URL configuration
 
-`CURSDEL_LICENSE_SERVER_URL` environment variable, defaulting to the
-documented development URL (`http://localhost:8080`, matching
-`appsettings.json`'s `PublicBaseUrl`) when unset. No production hostname
-is hardcoded -- per the task's explicit instruction not to invent one --
-so a real production URL can be supplied entirely through deployment
-configuration (packaging, environment, or a future config file) without a
-code change.
+`CURSDEL_LICENSE_SERVER_URL` environment variable overrides the base URL
+for local development or a self-hosted deployment. Unset, it defaults to
+the RePass Cloud-operated production server,
+`https://license-server.repasscloud.com` -- baked into the shipped binary
+so production use needs no configuration. (Earlier revisions of this ADR
+defaulted to the documented development URL, `http://localhost:8080`,
+matching `appsettings.json`'s `PublicBaseUrl`, with no production
+hostname hardcoded; that changed once a real production hostname existed
+to bake in. `cursdel_license::client::DEFAULT_DEV_SERVER_URL` still holds
+the development URL for local testing against a `license-server-app`
+instance run on the developer's own machine.)
 
 ### Product code
 
