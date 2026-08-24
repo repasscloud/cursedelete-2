@@ -151,13 +151,17 @@ Windows but not on macOS):
 
 ### Server URL configuration
 
-`CURSDEL_LICENSE_SERVER_URL` environment variable, defaulting to the
-documented development URL (`http://localhost:8080`, matching
-`appsettings.json`'s `PublicBaseUrl`) when unset. No production hostname
-is hardcoded -- per the task's explicit instruction not to invent one --
-so a real production URL can be supplied entirely through deployment
-configuration (packaging, environment, or a future config file) without a
-code change.
+`CURSDEL_LICENSE_SERVER_URL` environment variable overrides the base URL
+for local development or a self-hosted deployment. Unset, it defaults to
+the RePass Cloud-operated production server,
+`https://license-server.repasscloud.com` -- baked into the shipped binary
+so production use needs no configuration. (Earlier revisions of this ADR
+defaulted to the documented development URL, `http://localhost:8080`,
+matching `appsettings.json`'s `PublicBaseUrl`, with no production
+hostname hardcoded; that changed once a real production hostname existed
+to bake in. `cursdel_license::client::DEFAULT_DEV_SERVER_URL` still holds
+the development URL for local testing against a `license-server-app`
+instance run on the developer's own machine.)
 
 ### Product code
 

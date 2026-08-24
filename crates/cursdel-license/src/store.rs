@@ -35,6 +35,102 @@ pub fn default_paths() -> LicensePaths {
     }
 }
 
+/// Machine-wide storage paths, used by Deployment Key enrollment
+/// (`cursdel license enroll`). Unlike [`default_paths`] (per-user), these
+/// locations are shared by every account on the machine, so any user
+/// running `cursdel` on an enrolled machine resolves the same license --
+/// the point of unattended, seat-aware machine enrollment.
+pub fn machine_wide_paths() -> LicensePaths {
+    let dir = machine_wide_dir();
+    LicensePaths {
+        license_file: dir.join("license.json"),
+        activation_credentials_file: dir.join("activation.json"),
+    }
+}
+
+/// Overrides [`machine_wide_dir`]'s real, OS-owned location (`/var/lib/...`,
+/// `%PROGRAMDATA%\...`, `/Library/Application Support/...`) when set.
+/// Exists solely so tests -- and the CLI integration tests in particular,
+/// which spawn the real binary -- can exercise Deployment Key enrollment
+/// against an isolated temporary directory instead of real, root-owned
+/// machine state (which would be both unwritable by an unprivileged test
+/// runner and actively wrong to mutate from a test). Not documented as a
+/// user-facing configuration knob.
+const MACHINE_DIR_OVERRIDE_ENV_VAR: &str = "CURSDEL_MACHINE_LICENSE_DIR_FOR_TESTS";
+
+// Each `#[cfg(...)]` block below is the sole surviving statement in its
+// respective per-target build (the others are stripped before clippy ever
+// sees them), which is what makes clippy flag `return` as needless on
+// whichever single target compiled it -- keeping every branch's `return`
+// symmetrical here is clearer than special-casing the one that happens to
+// be last.
+#[allow(clippy::needless_return)]
+fn machine_wide_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os(MACHINE_DIR_OVERRIDE_ENV_VAR) {
+        return PathBuf::from(dir);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let program_data = std::env::var_os("PROGRAMDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("C:\\ProgramData"));
+        return program_data.join("RePassCloud").join("CurseDelete");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return PathBuf::from("/Library/Application Support/RePassCloud/CurseDelete");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return PathBuf::from("/var/lib/repasscloud/cursedelete");
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        PathBuf::from("/var/lib/repasscloud/cursedelete")
+    }
+}
+
+/// Fails clearly, *before* any network call, if the current process lacks
+/// the privilege to establish machine-wide state -- Deployment Key
+/// enrollment must never silently fall back to user-scoped activation
+/// (see the enrollment behaviour contract). Creates the machine-wide
+/// directory (if missing) and probes it with a throwaway file.
+pub fn ensure_machine_wide_writable(paths: &LicensePaths) -> io::Result<()> {
+    let dir = paths
+        .license_file
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid machine-wide path"))?;
+    std::fs::create_dir_all(dir)?;
+    let probe = dir.join(".cursdel-write-check");
+    std::fs::write(&probe, b"ok")?;
+    std::fs::remove_file(&probe)?;
+    Ok(())
+}
+
+/// Saves the (public, non-secret) signed license envelope to a
+/// machine-wide location, world-readable so any local user account can
+/// resolve the machine's license, but writable only by whatever privilege
+/// level created it (administrator/root on all three platforms).
+pub fn save_machine_license_file(
+    paths: &LicensePaths,
+    signed_license_json: &str,
+) -> io::Result<()> {
+    write_with_mode(&paths.license_file, signed_license_json.as_bytes(), 0o644)
+}
+
+/// Saves activation credentials (a bearer token) to a machine-wide
+/// location, owner-only -- same secrecy requirement as the per-user
+/// activation file, just rooted under the machine-wide directory instead.
+pub fn save_machine_activation_credentials(
+    paths: &LicensePaths,
+    creds: &ActivationCredentials,
+) -> io::Result<()> {
+    let json = serde_json::to_string_pretty(creds)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    write_with_mode(&paths.activation_credentials_file, json.as_bytes(), 0o600)
+}
+
 fn license_dir() -> PathBuf {
     if let Some(base) = directories::BaseDirs::new() {
         #[cfg(target_os = "windows")]
@@ -121,6 +217,14 @@ pub fn remove_license_file(paths: &LicensePaths) -> io::Result<()> {
 }
 
 fn write_restrictive(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_with_mode(path, bytes, 0o600)
+}
+
+fn write_with_mode(
+    path: &Path,
+    bytes: &[u8],
+    #[cfg_attr(not(unix), allow(unused_variables))] mode: u32,
+) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -133,19 +237,20 @@ fn write_restrictive(path: &Path, bytes: &[u8]) -> io::Result<()> {
             .write(true)
             .create(true)
             .truncate(true)
-            .mode(0o600)
+            .mode(mode)
             .open(path)?;
         // `OpenOptionsExt::mode` only affects the mode passed to open(2)'s
         // O_CREAT, which the kernel applies solely when this call actually
         // creates the file -- if `path` already existed (e.g. left behind
         // with looser permissions by an older version, a backup/restore
         // tool that doesn't preserve mode bits, or a manual copy), the
-        // `mode(0o600)` above is silently ignored and whatever permissions
-        // it already had persist across this rewrite. Re-assert 0600
-        // explicitly and unconditionally so a secret this file holds
-        // (the activation bearer token) is never left readable by other
-        // local accounts regardless of the file's prior state.
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        // `mode(mode)` above is silently ignored and whatever permissions
+        // it already had persist across this rewrite. Re-assert the
+        // intended mode explicitly and unconditionally so a secret this
+        // file may hold (an activation bearer token) is never left
+        // readable by other local accounts regardless of the file's prior
+        // state.
+        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
         file.write_all(bytes)
     }
 

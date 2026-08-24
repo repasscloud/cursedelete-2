@@ -182,15 +182,103 @@ activations only).
 ## `CURSDEL_LICENSE_SERVER_URL`
 
 Sets the base URL of the license server for online activation, refresh,
-and deactivate calls. Defaults to `http://localhost:8080` (the documented
-development URL) when unset — there is no hardcoded production hostname,
-so a real deployment supplies its production URL entirely through this
-environment variable:
+enrollment, and deactivate calls. Defaults to the RePass Cloud-operated
+production server, `https://license-server.repasscloud.com`, when unset —
+production use needs no configuration. Set this variable to point at a
+development or self-hosted server instead:
 
 ```bash
-export CURSDEL_LICENSE_SERVER_URL=https://license.example.com
+export CURSDEL_LICENSE_SERVER_URL=http://localhost:8080
 cursdel license activate --license-id LIC-... --activation-code ...
 ```
 
 This variable is irrelevant to `license status`, `license import`, and
 ordinary deletion — those never make a network call.
+
+## Unattended enrollment with a Deployment Key
+
+A **Deployment Key** is a separate credential from manual activation's
+License ID + Activation Code. It is not a license itself — it is an
+enrollment credential, created ahead of time by a license administrator
+against a specific license, that lets unattended tooling (Intune, an RMM,
+a golden VM image, a container entrypoint script) enroll a machine without
+a human typing an activation code:
+
+```text
+Manual activation:
+    License ID + Activation Code
+
+Deployment enrollment:
+    Deployment Key
+```
+
+Both produce the same kind of machine-bound activation under the hood —
+enrollment is just a second entrypoint into it, purpose-built for
+automation.
+
+```console
+$ cursdel license enroll --deployment-key-env CURSDEL_DEPLOYMENT_KEY
+Machine enrolled successfully via Deployment Key.
+License ID:   LIC-ABC123
+Activation:   3f2a9c1e-...-guid
+Scope:        machine-wide
+```
+
+Exactly one of the following supplies the key. Prefer the non-CLI-argument
+forms in automated environments, since process command-line arguments can
+be visible to other local accounts or recorded in shell history/process
+logs:
+
+| Flag | Use |
+|---|---|
+| `--deployment-key <VALUE>` | Direct value; convenient for interactive/testing use. |
+| `--deployment-key-env <ENV_VAR>` | Reads the key from the named environment variable. |
+| `--deployment-key-file <PATH>` | Reads the key from a file's contents. |
+| `--deployment-key-stdin` | Reads one line from standard input. |
+
+The Deployment Key is **never** written to disk, printed, or logged by
+`cursdel` — not in `activation.json`, not in normal output, not in error
+messages. Once enrollment succeeds, the resulting `license.json` and
+`activation.json` behave exactly like a manually-activated machine's:
+`license refresh` and `license deactivate` use the stored activation
+credentials, never the Deployment Key. This means revoking a Deployment
+Key stops *future* enrollments without breaking machines already enrolled
+through it.
+
+Re-running `license enroll` on an already-enrolled, still-valid machine is
+safe — it reports success without contacting the server or consuming
+another seat. If the license's seat pool is exhausted, enrollment fails
+clearly and does **not** fall back to Community or a lower license tier:
+
+```console
+$ cursdel license enroll --deployment-key-env CURSDEL_DEPLOYMENT_KEY
+Error: licence activation limit reached (500/500 active seats).
+Contact your licence administrator or RePass Cloud support.
+```
+
+### Machine-wide storage
+
+Deployment Key enrollment writes to a machine-wide location (shared by
+every account on the machine), not the per-user location manual
+`activate`/`import` use:
+
+| Platform | Location |
+|---|---|
+| Windows | `%PROGRAMDATA%\RePassCloud\CurseDelete\` |
+| Linux | `/var/lib/repasscloud/cursedelete/` |
+| macOS | `/Library/Application Support/RePassCloud/CurseDelete/` |
+
+This requires the process to have administrator/root privileges (or
+equivalent write access to that path). Enrollment fails with a clear error
+— never a silent downgrade to per-user or Community — if it can't
+establish machine-wide state:
+
+```console
+$ cursdel license enroll --deployment-key-env CURSDEL_DEPLOYMENT_KEY
+Error: cannot write machine-wide licence state at /var/lib/repasscloud/cursedelete/license.json: Permission denied (os error 13)
+Re-run with administrator/root privileges.
+```
+
+`license status` reports which scope is active (`machine-wide (Deployment
+Key enrollment)` or `user`) when a valid license is found; machine-wide
+state takes precedence over per-user state if both happen to be present.

@@ -14,16 +14,25 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::device::LocalDeviceIdentity;
+use crate::secret::Secret;
 
+/// Kept only for local development against a `license-server-app`
+/// instance run on the developer's own machine; the shipped binary's
+/// actual default is [`PRODUCTION_SERVER_URL`] below.
 pub const DEFAULT_DEV_SERVER_URL: &str = "http://localhost:8080";
 
-/// Environment variable used to configure the license server base URL.
-/// A production URL is a deployment-time configuration value, not
-/// something to hardcode here -- see `docs/adr/0004-licensing-integration.md`.
+/// The RePass Cloud-operated license server. This is the baked-in
+/// default `cursdel` ships with -- `CURSDEL_LICENSE_SERVER_URL` still
+/// overrides it for local development or a self-hosted deployment, but
+/// production use requires no configuration.
+pub const PRODUCTION_SERVER_URL: &str = "https://license-server.repasscloud.com";
+
+/// Environment variable used to override the license server base URL
+/// (local development, or a self-hosted deployment).
 pub const SERVER_URL_ENV_VAR: &str = "CURSDEL_LICENSE_SERVER_URL";
 
 pub fn server_base_url() -> String {
-    std::env::var(SERVER_URL_ENV_VAR).unwrap_or_else(|_| DEFAULT_DEV_SERVER_URL.to_string())
+    std::env::var(SERVER_URL_ENV_VAR).unwrap_or_else(|_| PRODUCTION_SERVER_URL.to_string())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +70,21 @@ struct ActivateRequest<'a> {
     request_id: String,
     #[serde(rename = "activationCode")]
     activation_code: &'a str,
+    #[serde(rename = "activationToken")]
+    activation_token: &'a str,
+    mode: &'a str,
+    device: DeviceRequest<'a>,
+}
+
+/// Request body for `POST /api/v1/deployment-keys/enroll`. The deployment
+/// key is serialised exactly once, into this single request, and never
+/// stored or logged anywhere else -- see `crate::secret::Secret`.
+#[derive(Serialize)]
+struct EnrollRequest<'a> {
+    #[serde(rename = "deploymentKey")]
+    deployment_key: &'a str,
+    #[serde(rename = "requestId")]
+    request_id: String,
     #[serde(rename = "activationToken")]
     activation_token: &'a str,
     mode: &'a str,
@@ -150,6 +174,39 @@ impl LicenseServerClient {
             "{}/api/v1/licenses/{}/activate",
             self.base_url.trim_end_matches('/'),
             license_id
+        );
+        let response = self.post_json(&url, &request)?;
+        Ok((activation_token, response))
+    }
+
+    /// Enrolls this machine under an existing licence using a Deployment
+    /// Key, per the license server's `/api/v1/deployment-keys/enroll`
+    /// contract. Returns the freshly generated `activation_token`
+    /// (persist it -- the server never echoes it back) alongside the
+    /// server's response, exactly like [`Self::activate`]. The Deployment
+    /// Key itself is used only to build this one request and is never
+    /// echoed, logged, or included in any error produced here.
+    pub fn enroll(
+        &self,
+        deployment_key: &Secret,
+        device: &LocalDeviceIdentity,
+    ) -> Result<(String, ActivationResponse), ClientError> {
+        let activation_token = generate_activation_token();
+        let request = EnrollRequest {
+            deployment_key: deployment_key.expose(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            activation_token: &activation_token,
+            mode: "online",
+            device: DeviceRequest {
+                scheme: device.scheme,
+                device_id: &device.device_id,
+                device_name: Some(&device.device_name),
+            },
+        };
+
+        let url = format!(
+            "{}/api/v1/deployment-keys/enroll",
+            self.base_url.trim_end_matches('/')
         );
         let response = self.post_json(&url, &request)?;
         Ok((activation_token, response))
@@ -294,9 +351,9 @@ mod tests {
     // dependency-injected override instead of adding another env mutation
     // here, to avoid a real cross-test race.
     #[test]
-    fn default_server_url_is_documented_dev_url_when_env_unset() {
+    fn default_server_url_is_the_baked_in_production_url_when_env_unset() {
         std::env::remove_var(SERVER_URL_ENV_VAR);
-        assert_eq!(server_base_url(), DEFAULT_DEV_SERVER_URL);
+        assert_eq!(server_base_url(), PRODUCTION_SERVER_URL);
     }
 
     #[test]

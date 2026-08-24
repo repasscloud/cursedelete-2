@@ -9,6 +9,9 @@
 //! filesystem location, per the product's destructive-testing safety
 //! rule.
 
+#[path = "support/fake_license_server.rs"]
+mod fake_license_server;
+
 use std::fs;
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -18,6 +21,21 @@ use predicates::prelude::*;
 
 fn cursdel() -> Command {
     Command::cargo_bin("cursdel").expect("cursdel binary should build")
+}
+
+/// Sets up isolated per-user and machine-wide storage locations for a
+/// `license` subcommand test, so it never touches the real developer
+/// machine's config or (would-be, unwritable-without-root) machine-wide
+/// state. `machine_dir` should be a fresh subdirectory of the test's own
+/// `tempfile::tempdir()`.
+fn with_isolated_license_storage<'a>(
+    cmd: &'a mut Command,
+    home_dir: &Path,
+    machine_dir: &Path,
+) -> &'a mut Command {
+    cmd.env("HOME", home_dir)
+        .env("XDG_CONFIG_HOME", home_dir.join(".config"))
+        .env("CURSDEL_MACHINE_LICENSE_DIR_FOR_TESTS", machine_dir)
 }
 
 fn write_file(path: &Path, contents: &[u8]) {
@@ -619,4 +637,314 @@ fn interrupted_operation_reports_interrupted_exit_code() {
         Some(6),
         "expected the documented Interrupted exit code"
     );
+}
+
+// --- `license enroll` (Deployment Key enrollment) -------------------------
+
+const FAKE_DEPLOYMENT_KEY: &str =
+    "dpk_live_A1B2C3D4E5F60789_9f2h3JlN0pQxYzT1uVwR8sD7eGkLmC4bXaHi6Y0oPqI";
+
+#[test]
+fn license_enroll_requires_a_deployment_key_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cmd = cursdel();
+    with_isolated_license_storage(&mut cmd, dir.path(), &dir.path().join("machine"));
+    cmd.args(["license", "enroll"])
+        .assert()
+        .failure()
+        .code(64)
+        .stderr(predicate::str::contains("deployment-key"));
+}
+
+#[test]
+fn license_enroll_conflicting_key_sources_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cmd = cursdel();
+    with_isolated_license_storage(&mut cmd, dir.path(), &dir.path().join("machine"));
+    cmd.args(["license", "enroll"])
+        .arg("--deployment-key")
+        .arg(FAKE_DEPLOYMENT_KEY)
+        .arg("--deployment-key-env")
+        .arg("SOME_VAR")
+        .assert()
+        .failure()
+        .code(64);
+}
+
+#[test]
+fn license_enroll_help_documents_all_key_input_methods() {
+    cursdel()
+        .args(["license", "enroll", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--deployment-key "))
+        .stdout(predicate::str::contains("--deployment-key-env"))
+        .stdout(predicate::str::contains("--deployment-key-file"))
+        .stdout(predicate::str::contains("--deployment-key-stdin"));
+}
+
+/// A rejected (401) Deployment Key must produce a clear, non-zero-exit
+/// error and must never write any machine-wide state -- and, just as
+/// importantly, the key itself must never appear anywhere in the
+/// process's output, success or failure.
+#[test]
+fn license_enroll_rejects_invalid_deployment_key_and_never_echoes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let machine_dir = dir.path().join("machine");
+    let server = fake_license_server::spawn(1, |path, _body| {
+        assert!(path.contains("/deployment-keys/enroll"));
+        (
+            401,
+            r#"{"title":"Deployment key is invalid.","status":401}"#.to_string(),
+        )
+    });
+
+    let mut cmd = cursdel();
+    with_isolated_license_storage(&mut cmd, dir.path(), &machine_dir);
+    let output = cmd
+        .args(["license", "enroll"])
+        .arg("--deployment-key")
+        .arg(FAKE_DEPLOYMENT_KEY)
+        .env("CURSDEL_LICENSE_SERVER_URL", &server.base_url)
+        .assert()
+        .failure()
+        .code(7)
+        .stderr(predicate::str::contains("Deployment Key rejected"))
+        .get_output()
+        .clone();
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !combined.contains(FAKE_DEPLOYMENT_KEY),
+        "the Deployment Key must never appear in process output"
+    );
+    assert!(
+        !machine_dir.join("license.json").exists(),
+        "a rejected key must not write any machine-wide state"
+    );
+    assert!(!machine_dir.join("activation.json").exists());
+}
+
+/// Seat exhaustion (409) must be reported clearly, with guidance to
+/// contact an administrator, and must not fall back to a lower/free tier.
+#[test]
+fn license_enroll_reports_seat_exhaustion_clearly() {
+    let dir = tempfile::tempdir().unwrap();
+    let machine_dir = dir.path().join("machine");
+    let server = fake_license_server::spawn(1, |_path, _body| {
+        (
+            409,
+            r#"{"title":"License activation limit reached (500/500 active seats).","status":409}"#
+                .to_string(),
+        )
+    });
+
+    let mut cmd = cursdel();
+    with_isolated_license_storage(&mut cmd, dir.path(), &machine_dir);
+    cmd.args(["license", "enroll"])
+        .arg("--deployment-key")
+        .arg(FAKE_DEPLOYMENT_KEY)
+        .env("CURSDEL_LICENSE_SERVER_URL", &server.base_url)
+        .assert()
+        .failure()
+        .code(7)
+        .stderr(predicate::str::contains("seats"))
+        .stderr(predicate::str::contains(
+            "Contact your licence administrator",
+        ));
+    assert!(!machine_dir.join("license.json").exists());
+}
+
+/// A server that returns a well-formed but untrusted-key-signed licence
+/// (the only kind of real signed fixture available without production key
+/// material -- see `license_import_rejects_a_license_signed_by_an_untrusted_key`
+/// above for the same constraint on the `import` path) must be rejected by
+/// local verification, and nothing must be persisted as a result. This
+/// exercises "signed licence is verified before persistence" end to end
+/// through the real binary.
+#[test]
+fn license_enroll_verifies_signed_license_before_persisting_it() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../cursdel-license/tests/fixtures/test.license");
+    let signed_license = fs::read_to_string(&fixture).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let machine_dir = dir.path().join("machine");
+    let response_body = serde_json::json!({
+        "licenseId": "LIC-TEST-0001",
+        "activationId": "11111111-1111-1111-1111-111111111111",
+        "status": "active",
+        "signedLicense": signed_license,
+        "refreshAfter": "2099-01-01T00:00:00Z",
+        "leaseExpiresAt": "2099-02-01T00:00:00Z",
+    })
+    .to_string();
+    let server = fake_license_server::spawn(1, move |_path, _body| (200, response_body.clone()));
+
+    let mut cmd = cursdel();
+    with_isolated_license_storage(&mut cmd, dir.path(), &machine_dir);
+    cmd.args(["license", "enroll"])
+        .arg("--deployment-key")
+        .arg(FAKE_DEPLOYMENT_KEY)
+        .env("CURSDEL_LICENSE_SERVER_URL", &server.base_url)
+        .assert()
+        .failure()
+        .code(99)
+        .stderr(predicate::str::contains("failed local verification"));
+
+    assert!(
+        !machine_dir.join("license.json").exists(),
+        "an unverifiable licence must never be written to disk"
+    );
+    assert!(!machine_dir.join("activation.json").exists());
+}
+
+#[test]
+fn license_enroll_fails_clearly_when_server_is_unreachable() {
+    let dir = tempfile::tempdir().unwrap();
+    let machine_dir = dir.path().join("machine");
+    let mut cmd = cursdel();
+    with_isolated_license_storage(&mut cmd, dir.path(), &machine_dir);
+    cmd.args(["license", "enroll"])
+        .arg("--deployment-key")
+        .arg(FAKE_DEPLOYMENT_KEY)
+        // Port 1 is reserved/unlisted and will refuse the connection
+        // immediately rather than hanging the test.
+        .env("CURSDEL_LICENSE_SERVER_URL", "http://127.0.0.1:1")
+        .assert()
+        .failure()
+        .code(99)
+        .stderr(predicate::str::contains("could not reach"));
+}
+
+#[cfg(unix)]
+#[test]
+fn license_enroll_fails_clearly_when_machine_wide_path_is_not_writable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let machine_dir = dir.path().join("machine");
+    fs::create_dir_all(&machine_dir).unwrap();
+    fs::set_permissions(&machine_dir, fs::Permissions::from_mode(0o500)).unwrap();
+
+    let mut cmd = cursdel();
+    with_isolated_license_storage(&mut cmd, dir.path(), &machine_dir);
+    let result = cmd
+        .args(["license", "enroll"])
+        .arg("--deployment-key")
+        .arg(FAKE_DEPLOYMENT_KEY)
+        // No server should ever be contacted: the privilege check must
+        // fail before any network call is made.
+        .env("CURSDEL_LICENSE_SERVER_URL", "http://127.0.0.1:1")
+        .assert()
+        .failure()
+        .code(3)
+        .stderr(predicate::str::contains("administrator/root"));
+
+    let _ = fs::set_permissions(&machine_dir, fs::Permissions::from_mode(0o755));
+    result.stderr(predicate::str::contains("administrator/root"));
+}
+
+/// `license refresh` after enrollment must work from the stored activation
+/// credentials alone, with no Deployment Key involved anywhere in the
+/// command -- this proves revoking a Deployment Key can never break a
+/// machine that already enrolled through it.
+#[test]
+fn license_refresh_works_after_enrollment_without_a_deployment_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let machine_dir = dir.path().join("machine");
+    fs::create_dir_all(&machine_dir).unwrap();
+    fs::write(machine_dir.join("license.json"), "{\"placeholder\":true}").unwrap();
+    fs::write(
+        machine_dir.join("activation.json"),
+        serde_json::json!({
+            "activationId": "act-1",
+            "activationToken": "token-1",
+            "mode": "online",
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let refreshed_body = serde_json::json!({
+        "licenseId": "LIC-TEST-0001",
+        "activationId": "act-1",
+        "status": "active",
+        "signedLicense": "{\"refreshed\":true}",
+        "refreshAfter": "2099-01-01T00:00:00Z",
+        "leaseExpiresAt": "2099-02-01T00:00:00Z",
+    })
+    .to_string();
+    let server = fake_license_server::spawn(1, move |path, body| {
+        assert!(path.contains("/activations/act-1/refresh"));
+        assert!(
+            !body.contains("dpk_live"),
+            "refresh must never send a Deployment Key"
+        );
+        (200, refreshed_body.clone())
+    });
+
+    let mut cmd = cursdel();
+    with_isolated_license_storage(&mut cmd, dir.path(), &machine_dir);
+    cmd.args(["license", "refresh"])
+        .env("CURSDEL_LICENSE_SERVER_URL", &server.base_url)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("License refreshed."));
+
+    let saved = fs::read_to_string(machine_dir.join("license.json")).unwrap();
+    assert!(saved.contains("refreshed"));
+}
+
+/// `license deactivate` after enrollment must likewise work from the
+/// stored activation credentials alone.
+#[test]
+fn license_deactivate_works_after_enrollment_without_a_deployment_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let machine_dir = dir.path().join("machine");
+    fs::create_dir_all(&machine_dir).unwrap();
+    fs::write(machine_dir.join("license.json"), "{\"placeholder\":true}").unwrap();
+    fs::write(
+        machine_dir.join("activation.json"),
+        serde_json::json!({
+            "activationId": "act-1",
+            "activationToken": "token-1",
+            "mode": "online",
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let server = fake_license_server::spawn(1, move |path, body| {
+        assert!(path.contains("/activations/act-1/deactivate"));
+        assert!(
+            !body.contains("dpk_live"),
+            "deactivate must never send a Deployment Key"
+        );
+        (
+            200,
+            serde_json::json!({
+                "licenseId": "LIC-TEST-0001",
+                "activationId": "act-1",
+                "status": "deactivated",
+                "deactivatedAt": "2026-01-01T00:00:00Z",
+            })
+            .to_string(),
+        )
+    });
+
+    let mut cmd = cursdel();
+    with_isolated_license_storage(&mut cmd, dir.path(), &machine_dir);
+    cmd.args(["license", "deactivate"])
+        .env("CURSDEL_LICENSE_SERVER_URL", &server.base_url)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("deactivated"));
+
+    assert!(!machine_dir.join("activation.json").exists());
+    assert!(!machine_dir.join("license.json").exists());
 }
