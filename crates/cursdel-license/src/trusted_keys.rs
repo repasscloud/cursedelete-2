@@ -17,15 +17,15 @@ pub fn trusted_public_keys() -> HashMap<&'static str, &'static str> {
     keys.insert(
         "primary-2026",
         "-----BEGIN PUBLIC KEY-----\n\
-         MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEXXu3cKxsg4XRn3w+DBklf2uL1Zzm\n\
-         2ZS9bU3kyD7SY5AYM5fVdBAavnS4esT4dpBU1sV4RLPfVuH2Vu7f7BDXtQ==\n\
+         MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfI5MgZP+c6rTxr2wABqPIHlqE5Cf\n\
+         wy5HMrUTcnJfdj/ksm1TLmvbPJF6GJ+N6PlTCdGe0vssSBTuPbFOZEDrSQ==\n\
          -----END PUBLIC KEY-----\n",
     );
     keys.insert(
         "secondary-2026",
         "-----BEGIN PUBLIC KEY-----\n\
-         MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEqlkXV3jGhEOCaRq6aD11pYmXVNgv\n\
-         6rJS/aY9WtJHHH6kaTKFxgj1eu8a7Qw4fVh+wRnFd4T29taRbKDxgmPpaA==\n\
+         MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEJ0LLdDYwckz5M6XJf3oWgcvyAKec\n\
+         B7gLmxTtszqG6sN9aQkV1oI0Yo/KhZpyP/u0E7iGKSkxiT+sH6nJo5w7Ew==\n\
          -----END PUBLIC KEY-----\n",
     );
     keys
