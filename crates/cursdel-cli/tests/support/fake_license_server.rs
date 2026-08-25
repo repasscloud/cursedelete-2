@@ -104,6 +104,7 @@ fn handle_one(mut stream: TcpStream, handler: &(impl Fn(&str, &str) -> (u16, Str
         200 => "200 OK",
         400 => "400 Bad Request",
         401 => "401 Unauthorized",
+        404 => "404 Not Found",
         409 => "409 Conflict",
         429 => "429 Too Many Requests",
         503 => "503 Service Unavailable",

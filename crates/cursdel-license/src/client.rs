@@ -136,6 +136,28 @@ pub struct DeactivationResponse {
     pub deactivated_at: String,
 }
 
+#[derive(Serialize)]
+struct ForceDeactivateRequest<'a> {
+    #[serde(rename = "deploymentKey")]
+    deployment_key: &'a str,
+    device: DeviceRequest<'a>,
+}
+
+/// Response shape for `POST /api/v1/deployment-keys/force-deactivate`; see
+/// `deployment-key-machine-activation.md`. Deliberately not the same type
+/// as [`DeactivationResponse`] even though the fields line up today --
+/// the two endpoints are versioned independently server-side.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ForceDeactivationResponse {
+    #[serde(rename = "licenseId")]
+    pub license_id: String,
+    #[serde(rename = "activationId")]
+    pub activation_id: String,
+    pub status: String,
+    #[serde(rename = "deactivatedAt")]
+    pub deactivated_at: String,
+}
+
 pub struct LicenseServerClient {
     base_url: String,
 }
@@ -262,6 +284,35 @@ impl LicenseServerClient {
             "{}/api/v1/activations/{}/deactivate",
             self.base_url.trim_end_matches('/'),
             activation_id
+        );
+        self.post_json(&url, &request)
+    }
+
+    /// Force-deactivates this machine's seat via
+    /// `POST /api/v1/deployment-keys/force-deactivate`, per
+    /// `deployment-key-machine-activation.md`. Unlike [`Self::deactivate`],
+    /// this needs no local `activation_token` -- it exists specifically
+    /// for the case where enrollment succeeded server-side but the local
+    /// credentials were never (or no longer can be) persisted, so the
+    /// normal deactivate path has nothing to authenticate with (issue
+    /// #13). Authenticated by the Deployment Key itself; the server rate
+    /// limits and audits this endpoint more strictly than plain enroll.
+    pub fn force_deactivate(
+        &self,
+        deployment_key: &Secret,
+        device: &LocalDeviceIdentity,
+    ) -> Result<ForceDeactivationResponse, ClientError> {
+        let request = ForceDeactivateRequest {
+            deployment_key: deployment_key.expose(),
+            device: DeviceRequest {
+                scheme: device.scheme,
+                device_id: &device.device_id,
+                device_name: None,
+            },
+        };
+        let url = format!(
+            "{}/api/v1/deployment-keys/force-deactivate",
+            self.base_url.trim_end_matches('/')
         );
         self.post_json(&url, &request)
     }

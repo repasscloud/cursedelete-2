@@ -253,6 +253,7 @@ cursdel license import <PATH>
 cursdel license deactivate
 cursdel license refresh
 cursdel license enroll (--deployment-key <KEY> | --deployment-key-env <ENV_VAR> | --deployment-key-file <PATH> | --deployment-key-stdin)
+cursdel license force-deactivate (--deployment-key <KEY> | --deployment-key-env <ENV_VAR> | --deployment-key-file <PATH> | --deployment-key-stdin)
 ```
 
 | Subcommand | Purpose |
@@ -264,6 +265,7 @@ cursdel license enroll (--deployment-key <KEY> | --deployment-key-env <ENV_VAR> 
 | `deactivate` | Free this device's activation so the license can be activated on another device. |
 | `refresh` | Renew the current online activation lease before it expires. No-op/error for offline-mode activations, which have no lease to refresh. |
 | `enroll` | Unattended machine enrollment via a Deployment Key: contacts the license server and persists the returned signed license and activation credentials to **machine-wide** storage (see [LICENSING.md](LICENSING.md#unattended-enrollment-with-a-deployment-key)). Exactly one `--deployment-key*` flag is required. |
+| `force-deactivate` | Recovery path for a machine stranded with an active server-side seat but no local `activation.json` (e.g. a failed/partial `enroll`): releases the seat using the Deployment Key itself, needing no local credentials (see [LICENSING.md](LICENSING.md#recovering-a-stranded-machine-with-license-force-deactivate)). Prefer `deactivate` whenever local credentials are present. Exactly one `--deployment-key*` flag is required. |
 
 ## Verified `--help` output
 

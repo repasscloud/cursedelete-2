@@ -118,10 +118,26 @@ fn machine_wide_dir() -> PathBuf {
 /// (see the enrollment behaviour contract). Creates the machine-wide
 /// directory (if missing) and probes it with a throwaway file.
 pub fn ensure_machine_wide_writable(paths: &LicensePaths) -> io::Result<()> {
-    let dir = paths
-        .license_file
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid machine-wide path"))?;
+    ensure_writable(paths)
+}
+
+/// Fails clearly, *before* any network call, if the current process
+/// cannot persist activation state at `paths` -- shared by both the
+/// machine-wide (Deployment Key enrollment) and per-user (`license
+/// activate`) preflight checks (issue #13). Without this check, a manual
+/// `activate` could have the server accept the activation and issue a
+/// seat, only to then fail to write the local credentials file (missing
+/// directory, read-only filesystem, permissions) -- leaving the device
+/// holding an active seat on the server with no local credentials to show
+/// for it, and no CLI path to recover it (releasing a seat normally
+/// requires the `activation_token` that only exists server-side in that
+/// scenario). Creates the target directory (if missing) and probes it
+/// with a throwaway file so a directory that exists but isn't writable
+/// (not just a missing one) is caught too.
+pub fn ensure_writable(paths: &LicensePaths) -> io::Result<()> {
+    let dir = paths.license_file.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "invalid license storage path")
+    })?;
     std::fs::create_dir_all(dir)?;
     let probe = dir.join(".cursdel-write-check");
     std::fs::write(&probe, b"ok")?;

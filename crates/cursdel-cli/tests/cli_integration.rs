@@ -948,3 +948,203 @@ fn license_deactivate_works_after_enrollment_without_a_deployment_key() {
     assert!(!machine_dir.join("activation.json").exists());
     assert!(!machine_dir.join("license.json").exists());
 }
+
+// --- `license activate` write-access preflight (issue #13) ----------------
+
+/// A per-user `activate` must never contact the licence server if it can't
+/// persist the resulting credentials locally -- otherwise the server could
+/// accept the activation and consume a seat this device can never actually
+/// save, stranding it exactly as described in issue #13.
+#[cfg(unix)]
+#[test]
+fn license_activate_fails_clearly_when_user_path_is_not_writable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Lock down HOME itself (rather than a specific platform subpath, e.g.
+    // `.config` vs `Library/Application Support`) so this test's outcome
+    // doesn't depend on which of `store::license_dir`'s per-OS branches
+    // actually runs: none of them can create their target directory
+    // underneath a HOME they lack write access to.
+    let home_dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(home_dir.path(), fs::Permissions::from_mode(0o500)).unwrap();
+    let machine_dir_parent = tempfile::tempdir().unwrap();
+
+    let mut cmd = cursdel();
+    with_isolated_license_storage(
+        &mut cmd,
+        home_dir.path(),
+        &machine_dir_parent.path().join("machine"),
+    );
+    let result = cmd
+        .args(["license", "activate"])
+        .arg("--license-id")
+        .arg("LIC-TEST-0001")
+        .arg("--activation-code")
+        .arg("CODE-1")
+        // No server should ever be contacted: the write-access preflight
+        // check must fail before any network call is made.
+        .env("CURSDEL_LICENSE_SERVER_URL", "http://127.0.0.1:1")
+        .assert()
+        .failure()
+        .code(3)
+        .stderr(predicate::str::contains("cannot write licence state"));
+
+    let _ = fs::set_permissions(home_dir.path(), fs::Permissions::from_mode(0o755));
+    result.stderr(predicate::str::contains("Fix permissions and retry"));
+}
+
+// --- `license force-deactivate` (issue #13) --------------------------------
+
+#[test]
+fn license_force_deactivate_requires_a_deployment_key_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cmd = cursdel();
+    with_isolated_license_storage(&mut cmd, dir.path(), &dir.path().join("machine"));
+    cmd.args(["license", "force-deactivate"])
+        .assert()
+        .failure()
+        .code(64)
+        .stderr(predicate::str::contains("deployment-key"));
+}
+
+/// The Deployment Key must never appear in process output, and the request
+/// must hit the documented `force-deactivate` endpoint (not plain
+/// `deactivate` or `enroll`).
+#[test]
+fn license_force_deactivate_calls_the_force_deactivate_endpoint_and_never_echoes_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let machine_dir = dir.path().join("machine");
+    let server = fake_license_server::spawn(1, |path, body| {
+        assert!(path.contains("/deployment-keys/force-deactivate"));
+        assert!(body.contains(FAKE_DEPLOYMENT_KEY));
+        (
+            200,
+            serde_json::json!({
+                "licenseId": "LIC-TEST-0001",
+                "activationId": "act-1",
+                "status": "deactivated",
+                "deactivatedAt": "2026-01-01T00:00:00Z",
+            })
+            .to_string(),
+        )
+    });
+
+    let mut cmd = cursdel();
+    with_isolated_license_storage(&mut cmd, dir.path(), &machine_dir);
+    let output = cmd
+        .args(["license", "force-deactivate"])
+        .arg("--deployment-key")
+        .arg(FAKE_DEPLOYMENT_KEY)
+        .env("CURSDEL_LICENSE_SERVER_URL", &server.base_url)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("force-deactivated"))
+        .get_output()
+        .clone();
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !combined.contains(FAKE_DEPLOYMENT_KEY),
+        "the Deployment Key must never appear in process output"
+    );
+}
+
+/// Force-deactivate must clear any stale local machine-wide state so a
+/// subsequent `enroll` starts clean, even though the server call itself
+/// needs no local credentials.
+#[test]
+fn license_force_deactivate_clears_stale_local_machine_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let machine_dir = dir.path().join("machine");
+    fs::create_dir_all(&machine_dir).unwrap();
+    fs::write(machine_dir.join("license.json"), "{\"placeholder\":true}").unwrap();
+    fs::write(
+        machine_dir.join("activation.json"),
+        serde_json::json!({
+            "activationId": "act-1",
+            "activationToken": "stale-token",
+            "mode": "online",
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let server = fake_license_server::spawn(1, |_path, _body| {
+        (
+            200,
+            serde_json::json!({
+                "licenseId": "LIC-TEST-0001",
+                "activationId": "act-1",
+                "status": "deactivated",
+                "deactivatedAt": "2026-01-01T00:00:00Z",
+            })
+            .to_string(),
+        )
+    });
+
+    let mut cmd = cursdel();
+    with_isolated_license_storage(&mut cmd, dir.path(), &machine_dir);
+    cmd.args(["license", "force-deactivate"])
+        .arg("--deployment-key")
+        .arg(FAKE_DEPLOYMENT_KEY)
+        .env("CURSDEL_LICENSE_SERVER_URL", &server.base_url)
+        .assert()
+        .success();
+
+    assert!(!machine_dir.join("activation.json").exists());
+    assert!(!machine_dir.join("license.json").exists());
+}
+
+/// A rejected (401) Deployment Key must produce a clear, non-zero-exit
+/// error, matching `enroll`'s handling of the same status.
+#[test]
+fn license_force_deactivate_rejects_invalid_deployment_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let machine_dir = dir.path().join("machine");
+    let server = fake_license_server::spawn(1, |_path, _body| {
+        (
+            401,
+            r#"{"title":"Deployment key is invalid.","status":401}"#.to_string(),
+        )
+    });
+
+    let mut cmd = cursdel();
+    with_isolated_license_storage(&mut cmd, dir.path(), &machine_dir);
+    cmd.args(["license", "force-deactivate"])
+        .arg("--deployment-key")
+        .arg(FAKE_DEPLOYMENT_KEY)
+        .env("CURSDEL_LICENSE_SERVER_URL", &server.base_url)
+        .assert()
+        .failure()
+        .code(7)
+        .stderr(predicate::str::contains("Deployment Key rejected"));
+}
+
+/// Rate limiting (429) must be surfaced with guidance specific to
+/// force-deactivate's stricter limits, not enroll's generic message.
+#[test]
+fn license_force_deactivate_reports_rate_limiting_clearly() {
+    let dir = tempfile::tempdir().unwrap();
+    let machine_dir = dir.path().join("machine");
+    let server = fake_license_server::spawn(1, |_path, _body| {
+        (
+            429,
+            r#"{"title":"Too many force-deactivate attempts.","status":429}"#.to_string(),
+        )
+    });
+
+    let mut cmd = cursdel();
+    with_isolated_license_storage(&mut cmd, dir.path(), &machine_dir);
+    cmd.args(["license", "force-deactivate"])
+        .arg("--deployment-key")
+        .arg(FAKE_DEPLOYMENT_KEY)
+        .env("CURSDEL_LICENSE_SERVER_URL", &server.base_url)
+        .assert()
+        .failure()
+        .code(99)
+        .stderr(predicate::str::contains("rate limited"));
+}

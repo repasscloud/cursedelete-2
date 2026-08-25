@@ -39,6 +39,17 @@ pub fn run(action: LicenseAction) -> ExitCode {
             deployment_key_file,
             deployment_key_stdin,
         ),
+        LicenseAction::ForceDeactivate {
+            deployment_key,
+            deployment_key_env,
+            deployment_key_file,
+            deployment_key_stdin,
+        } => force_deactivate(
+            deployment_key,
+            deployment_key_env,
+            deployment_key_file,
+            deployment_key_stdin,
+        ),
     }
 }
 
@@ -189,10 +200,23 @@ fn activate(
             }
         }
     } else {
+        let paths = store::default_paths();
+        // Fail before touching the network if this process cannot persist
+        // activation state locally -- otherwise the server could accept
+        // the activation and consume a seat for a credential this device
+        // can never actually save (see issue #13).
+        if let Err(e) = store::ensure_writable(&paths) {
+            eprintln!(
+                "Error: cannot write licence state at {}: {e}\n\
+                 Fix permissions and retry.",
+                paths.license_file.display()
+            );
+            return ExitCode::PrivilegeRequirementNotSatisfied;
+        }
+
         let client = LicenseServerClient::new(server_base_url());
         match client.activate(license_id, activation_code, &device) {
             Ok((token, response)) => {
-                let paths = store::default_paths();
                 if let Err(e) = store::save_license_file(&paths, &response.signed_license) {
                     eprintln!("Error: could not save license file: {e}");
                     return ExitCode::UnexpectedFatal;
@@ -532,6 +556,121 @@ fn enroll(
     println!("Activation:   {}", response.activation_id);
     println!("Scope:        machine-wide");
     ExitCode::Success
+}
+
+/// Recovers a machine stranded by a partial/failed enrollment (server
+/// issued a seat, local `activation_token` was never persisted or has
+/// since been lost) by calling the server's force-deactivate endpoint,
+/// authenticated with the Deployment Key rather than the missing local
+/// credential -- see issue #13 and
+/// `deployment-key-machine-activation.md`. On success, also clears any
+/// local machine-wide license/activation state for this device so a
+/// subsequent `license enroll` starts clean rather than finding a stale,
+/// now-invalid local license file.
+fn force_deactivate(
+    deployment_key: Option<String>,
+    deployment_key_env: Option<String>,
+    deployment_key_file: Option<PathBuf>,
+    deployment_key_stdin: bool,
+) -> ExitCode {
+    let deployment_key = match resolve_deployment_key(
+        deployment_key,
+        deployment_key_env,
+        deployment_key_file,
+        deployment_key_stdin,
+    ) {
+        Ok(key) => key,
+        Err(msg) => {
+            eprintln!("Error: {msg}");
+            return ExitCode::CliUsageError;
+        }
+    };
+
+    if deployment_key.expose().trim().is_empty() {
+        eprintln!("Error: the supplied Deployment Key is empty.");
+        return ExitCode::CliUsageError;
+    }
+
+    let device = device::current();
+    let client = LicenseServerClient::new(server_base_url());
+    match client.force_deactivate(&deployment_key, &device) {
+        Ok(response) => {
+            // Best-effort: the server-side release is what actually
+            // matters (the seat is freed), so a local cleanup failure is
+            // reported but doesn't change the outcome.
+            let paths = store::machine_wide_paths();
+            if let Err(e) = store::remove_activation_credentials(&paths) {
+                eprintln!("Warning: could not remove local activation credentials: {e}");
+            }
+            if let Err(e) = store::remove_license_file(&paths) {
+                eprintln!("Warning: could not remove local license file: {e}");
+            }
+            println!("Seat force-deactivated on the licence server.");
+            println!("License ID:   {}", response.license_id);
+            println!("Activation:   {}", response.activation_id);
+            println!("Status:       {}", response.status);
+            ExitCode::Success
+        }
+        Err(e) => report_force_deactivate_error(&e),
+    }
+}
+
+/// Maps a force-deactivate failure onto a distinct, actionable message and
+/// exit code. Never includes the Deployment Key itself, matching
+/// [`report_enroll_error`]'s guarantee for the same reason.
+fn report_force_deactivate_error(e: &ClientError) -> ExitCode {
+    match e {
+        ClientError::Rejected {
+            status,
+            title,
+            detail,
+        } => match *status {
+            400 => {
+                eprintln!("Error: force-deactivate request was rejected: {title}{detail}");
+                ExitCode::CliUsageError
+            }
+            401 => {
+                eprintln!(
+                    "Error: Deployment Key rejected: {title}{detail}\n\
+                     Contact your licence administrator for a valid Deployment Key."
+                );
+                ExitCode::LicenseRequired
+            }
+            404 => {
+                eprintln!(
+                    "Error: {title}{detail}\n\
+                     No active seat was found for this device on this Deployment Key."
+                );
+                ExitCode::LicenseRequired
+            }
+            429 => {
+                eprintln!(
+                    "Error: rate limited by the licence server: {title}{detail}\n\
+                     Force-deactivate is rate-limited more strictly than enroll -- wait a \
+                     moment and try again."
+                );
+                ExitCode::UnexpectedFatal
+            }
+            503 => {
+                eprintln!(
+                    "Error: licence server temporarily unavailable: {title}{detail}\nTry again later."
+                );
+                ExitCode::UnexpectedFatal
+            }
+            _ => {
+                eprintln!("Error: force-deactivate failed: {title}{detail} (status {status})");
+                ExitCode::UnexpectedFatal
+            }
+        },
+        ClientError::Network(_) => {
+            eprintln!("Error: could not reach the licence server: {e}");
+            ExitCode::UnexpectedFatal
+        }
+        ClientError::Decode(_) => {
+            eprintln!("Error: unexpected response from the licence server: {e}");
+            ExitCode::UnexpectedFatal
+        }
+    }
 }
 
 /// Maps a Deployment Key enrollment failure onto a distinct, actionable

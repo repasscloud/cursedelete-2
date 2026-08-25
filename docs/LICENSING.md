@@ -332,3 +332,57 @@ license is found; machine scope always takes precedence over user scope
 per the [resolution order](#resolution-order-machine--user--community)
 above — including reporting, not silently ignoring, an invalid
 machine-scope license rather than falling through to a user-scope one.
+
+### Write-access preflight
+
+Both `license activate` and `license enroll` verify they can persist
+activation state to disk *before* contacting the license server, not
+after. Without this, the server could accept an activation and issue a
+seat, only for the local write to then fail (missing directory, read-only
+filesystem, permissions) — leaving the device holding an active seat with
+no local credentials to show for it, and a retried activation/enrollment
+rejected with `409 Conflict` against a seat it can no longer identify
+itself with. The check creates the target directory if it doesn't exist
+and probes it with a throwaway file, so a directory that exists but isn't
+writable is caught too, not just a missing one:
+
+```console
+$ cursdel license activate --license-id LIC-ABC123 --activation-code CODE-XYZ
+Error: cannot write licence state at /home/user/.config/cursedelete-2/license.json: Permission denied (os error 13)
+Fix permissions and retry.
+```
+
+### Recovering a stranded machine with `license force-deactivate`
+
+If a machine ends up in the state the preflight check above exists to
+prevent — a seat active on the server with no matching local
+`activation.json` (e.g. from a version predating that check, or a local
+credentials file lost after enrollment otherwise completed) — neither
+`license status` nor `license deactivate` can help: both report "no active
+activation found," since they only ever look at local state, and a retried
+`license enroll` fails with `409 Conflict` because the server still
+considers the device enrolled.
+
+`license force-deactivate` recovers this without needing the missing
+`activation_token`, authenticating with the Deployment Key itself instead:
+
+```console
+$ cursdel license force-deactivate --deployment-key-env CURSDEL_DEPLOYMENT_KEY
+Seat force-deactivated on the licence server.
+License ID:   LIC-ABC123
+Activation:   3f2a9c1e-...-guid
+Status:       deactivated
+```
+
+It accepts the Deployment Key via the same `--deployment-key` /
+`--deployment-key-env` / `--deployment-key-file` / `--deployment-key-stdin`
+flags as `enroll`, and also clears any stale local machine-wide license/
+activation files so a subsequent `license enroll` starts clean.
+
+This is deliberately **not** the everyday deactivation path — prefer
+`license deactivate` (which uses the local `activation_token` and needs no
+Deployment Key) whenever local credentials are actually present.
+Force-deactivate is rate-limited more strictly than `enroll` server-side
+and every call is audited, so unexpected force-deactivate activity on a
+license is worth investigating (and possibly rotating the Deployment Key
+over).

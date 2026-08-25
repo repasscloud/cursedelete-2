@@ -9,6 +9,43 @@ source of truth; see `docs/RELEASE.md` for how a release is cut).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-08-25
+
+### Added
+
+- `cursdel license force-deactivate` (issue #13): recovers a machine
+  stranded with an active seat on the licence server but no matching local
+  `activation.json` — the scenario the write-access preflight check below
+  exists to prevent going forward, but which could still occur from a
+  version predating that check, or from local credentials lost after
+  enrollment otherwise completed. Neither `license status` nor `license
+  deactivate` can help in that state, since both only ever look at local
+  files, and a retried `license enroll` would hit a `409 Conflict` against
+  a seat it can no longer identify itself with. `force-deactivate`
+  authenticates with the Deployment Key itself instead of the missing
+  `activation_token`, via the licence server's
+  `POST /api/v1/deployment-keys/force-deactivate` endpoint (rate-limited
+  more strictly, and audited, server-side); it accepts the key via the
+  same `--deployment-key`/`--deployment-key-env`/`--deployment-key-file`/
+  `--deployment-key-stdin` flags as `enroll`, and clears any stale local
+  machine-wide state on success. See
+  `docs/LICENSING.md#recovering-a-stranded-machine-with-license-force-deactivate`.
+
+### Fixed
+
+- `cursdel license activate` (issue #13): now verifies it can persist
+  activation state locally *before* contacting the licence server, the
+  same preflight `license enroll` already ran for machine-wide state.
+  Previously, `activate` requested and completed activation with the
+  server first and only then tried to save the result — a local write
+  failure after that point (missing directory, read-only filesystem,
+  permissions) left the device holding an active seat on the server with
+  no local credentials to show for it, and no CLI path to recover (a
+  retried `activate` would be rejected, since the server still considers
+  the device already active, and releasing the seat normally needs the
+  `activation_token` that was never actually saved). See
+  `docs/LICENSING.md#write-access-preflight`.
+
 ## [2.0.1] - 2026-08-25
 
 ### Added

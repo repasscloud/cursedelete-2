@@ -185,4 +185,41 @@ pub enum LicenseAction {
         )]
         deployment_key_stdin: bool,
     },
+    /// Force-release this machine's seat using a Deployment Key, without
+    /// needing the local activation credentials that `license deactivate`
+    /// requires. Recovers a machine stranded by a partial/failed `enroll`
+    /// (the server issued a seat but this device never persisted, or has
+    /// since lost, its local `activation_token` -- see issue #13) so a
+    /// retried `enroll` doesn't hit a `409 Conflict` against a seat this
+    /// device can no longer identify itself with. Contacts the licence
+    /// server directly and is rate-limited more strictly than `enroll`;
+    /// use it only when `license enroll` reports the seat is already
+    /// active and `license deactivate` reports no local activation.
+    /// Exactly one of --deployment-key, --deployment-key-env,
+    /// --deployment-key-file, or --deployment-key-stdin is required.
+    ForceDeactivate {
+        #[arg(
+            long,
+            value_name = "KEY",
+            conflicts_with_all = ["deployment_key_env", "deployment_key_file", "deployment_key_stdin"]
+        )]
+        deployment_key: Option<String>,
+        #[arg(
+            long,
+            value_name = "ENV_VAR",
+            conflicts_with_all = ["deployment_key", "deployment_key_file", "deployment_key_stdin"]
+        )]
+        deployment_key_env: Option<String>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with_all = ["deployment_key", "deployment_key_env", "deployment_key_stdin"]
+        )]
+        deployment_key_file: Option<PathBuf>,
+        #[arg(
+            long,
+            conflicts_with_all = ["deployment_key", "deployment_key_env", "deployment_key_file"]
+        )]
+        deployment_key_stdin: bool,
+    },
 }
