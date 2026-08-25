@@ -1,0 +1,26 @@
+name: Lock Merged PR
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  lock:
+    # A PR can be closed without being merged, so check merged explicitly.
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Lock PR as resolved
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh api \
+            --method PUT \
+            "repos/$GH_REPO/issues/$PR_NUMBER/lock" \
+            -f lock_reason="resolved"
