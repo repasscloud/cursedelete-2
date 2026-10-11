@@ -16,7 +16,7 @@ the package name. File/line references let you re-verify anything.
 Three pieces, one repo (this one), one shared library:
 
 | Component | What it does | Where |
-|---|---|---|
+| --- | --- | --- |
 | **LicenseServer** | ASP.NET Core app: Stripe billing → license issuance, online activation API, admin UI, transactional email | `src/LicenseServer` |
 | **LicenseGenerator** | Offline CLI an *admin* runs to hand-sign a license file without the server (key management, manual/offline issuance) | `src/LicenseGenerator` |
 | **Licensing.Core** | The NuGet package. Offline, no-network license *verification*. This is what your CLI app references. | `src/Licensing.Core` |
@@ -83,7 +83,7 @@ by email, manually. It is a real, already-scripted flow
    `mode: "offline"`, and instead of POSTing it, **writes it to a file** (e.g.
    `offline-activation-request.json`) because the machine has no network path
    to the license server.
-2. The user emails that file to **hello@repasscloud.com** (or wherever you
+2. The user emails that file to **[hello@repasscloud.com](mailto:hello@repasscloud.com)** (or wherever you
    route support intake).
 3. A human admin (who *does* have network access) takes that JSON and calls
    the same `POST /api/v1/licenses/{licenseId}/activate` endpoint on the
@@ -136,14 +136,17 @@ artifact**, built by `.github/workflows/release-image.yml`:
 Two ways to consume it in the other repo:
 
 **A. Local NuGet feed pointed at the downloaded `.nupkg` (recommended):**
+
 ```bash
 mkdir -p ./nuget-local
 curl -L -o ./nuget-local/Licensing.Core.0.2.1.nupkg \
   https://github.com/danijeljw-RPC/licsense-server-poc/releases/download/v0.2.1/Licensing.Core.0.2.1.nupkg
 # verify against SHA256SUMS.txt from the same release before using it
 ```
+
 Add a `<packageSources>` entry for `./nuget-local` in the new repo's
 `NuGet.Config`, then:
+
 ```bash
 dotnet add package Licensing.Core --version 0.2.1
 ```
@@ -210,6 +213,7 @@ rotation happened — don't silently float to "latest."
 
 Rules worth knowing (all enforced by `LicenseSchema.Parse`,
 `src/Licensing.Core/LicenseSchema.cs`):
+
 - `deviceBinding` and `activation` are both present or both absent — never one
   without the other.
 - `entitlements` is a non-empty array, at most one entry per `product`.
@@ -254,7 +258,7 @@ Your message used "license type" for what the code calls **`edition`**, and
 genuinely different fields, both on every entitlement:
 
 | Field | Values | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `edition` | `community`, `project`, `education`, `consumer`, `business`, `smb`, `enterprise`, `corporate` (`ProductCatalog.cs:11-15`) | **Which feature tier** — drives feature gating |
 | `licenseType` | `perpetual`, `subscription`, `evaluation` (`LicenseTerms.cs:5-8`) | **Time model** — drives expiry behavior |
 
@@ -292,9 +296,11 @@ code.
 
 **Action for the CLI app:** pick one stable product code for it (e.g.
 `"my-cli-tool"`), hardcode it as a constant, and always call:
+
 ```csharp
 var entitlement = LicenseVerifier.ValidateProduct(verified, product: "my-cli-tool");
 ```
+
 That same string must be registered as a `ProductDefinition.Code` on the
 license server (admin creates it via `POST /api/v1/admin/products`) and used
 consistently in every license-data JSON an admin hand-signs, and in the Stripe
@@ -308,6 +314,7 @@ typo.
 
 `DeviceIdentity.GetCurrent()` (`src/Licensing.Core/DeviceIdentity.cs`) hashes a
 per-OS "stable" identifier:
+
 - Windows: registry `MachineGuid`
 - Linux: `/etc/machine-id` or `/var/lib/dbus/machine-id`
 - Fallback (macOS, or anything else): `Environment.MachineName` — noticeably
@@ -363,6 +370,7 @@ value your app needs, not something to hardcode.
 ### 6.1 Activate — `POST {baseUrl}/api/v1/licenses/{licenseId}/activate`
 
 Request:
+
 ```json
 {
   "requestId": "<new GUID, string>",
@@ -376,11 +384,13 @@ Request:
   }
 }
 ```
+
 `activationToken` **must** be exactly 32 random bytes, Base64-encoded, or the
 server rejects the request (`LicenseStore.cs:826-830`). Generate it with
 `RandomNumberGenerator.GetBytes(32)` → `Convert.ToBase64String(...)`.
 
 Response (`200 OK`):
+
 ```json
 {
   "licenseId": "LIC-ABC123",
@@ -391,6 +401,7 @@ Response (`200 OK`):
   "leaseExpiresAt": "2026-08-19T06:31:00Z"
 }
 ```
+
 **Persist locally and durably:** `activationId`, `activationToken` (the one
 *you* generated — the server never returns it, it only ever echoes back what
 you already have), and the `signedLicense` written to your license file path.
@@ -403,9 +414,11 @@ already active elsewhere, license canceled/revoked, no signing key available,
 etc.) — surface `title`/`detail` to the user; don't retry blindly on 4xx.
 
 ### 6.2 Validate — `POST {baseUrl}/api/v1/activations/{activationId}/validate`
+
 ```json
 { "activationToken": "<stored>", "deviceId": "<recomputed each call, not stored>" }
 ```
+
 Cheap liveness/status check; does not return a new signed license.
 
 ### 6.3 Refresh — `POST {baseUrl}/api/v1/activations/{activationId}/refresh`
@@ -449,7 +462,7 @@ File.WriteAllText(outputPath, JsonSerializer.Serialize(request, new JsonSerializ
 ```
 
 Tell the user, on-screen, after writing this file: email it to
-**hello@repasscloud.com**, and once they receive a `.license` file back, save
+**[hello@repasscloud.com](mailto:hello@repasscloud.com)**, and once they receive a `.license` file back, save
 it to the path your app expects (§10) and re-run the app.
 
 **Persist the same `activationToken` locally** as in the online path — the
@@ -478,6 +491,7 @@ static readonly IReadOnlyDictionary<string, FeatureSet> FeaturesByEdition = new 
     ["corporate"]  = FeatureSet.All,
 };
 ```
+
 (Illustrative — define whatever the product actually needs.) Look this up with
 `entitlement.Edition` after a successful `ValidateProduct` call. Treat an
 edition string that isn't in your map as "no features" (fail closed), not as a
@@ -519,7 +533,7 @@ crash — new editions can be added server-side without a client release.
 6. Implement a refresh routine per §6.3 (startup check + background timer),
    only for `mode: "online"` activations.
 7. Implement the offline path: same prompts, write the §7 request file
-   instead of POSTing, tell the user to email it to hello@repasscloud.com and
+   instead of POSTing, tell the user to email it to [hello@repasscloud.com](mailto:hello@repasscloud.com) and
    where to place the returned `.license` file.
 8. Implement a deactivate command per §6.4.
 9. Wire all of the above through `LicenseValidationException`/
