@@ -49,7 +49,7 @@ A Cargo workspace with:
   allowing genuinely OS-specific code (Win32 FFI, `libc` calls) inside.
 - `cursdel-policy` / `cursdel-license`: licence verification and
   edition/capability policy, decoupled from the deletion engine (see
-  ADR-0004).
+  ADR-0004, superseded by ADR-0010).
 - `cursdel-cli`: the `cursdel` binary, wiring CLI parsing to
   `cursdel-core::pipeline` and selecting the platform engine via `cfg`.
 

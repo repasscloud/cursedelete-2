@@ -1,6 +1,6 @@
 [package]
 name = "cursdel-license"
-description = "Rust-native verifier and activation client for the software-license-v1 envelope."
+description = "Product-agnostic Ed25519 licence verification, local licence storage, and the licensing-server integration boundary."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,19 +8,24 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Test-only signing helpers (`cursdel_license::testing`) for downstream
+# crates' tests. Only ever enable this from `[dev-dependencies]`: it signs
+# with deterministic, publicly-known test keys.
+test-support = []
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
+ed25519-dalek = { workspace = true }
 p256 = { workspace = true }
-ecdsa = { workspace = true }
-signature = { workspace = true }
+ml-dsa = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
 rand = { workspace = true }
-uuid = { workspace = true }
 ureq = { workspace = true }
 directories = { workspace = true }
 

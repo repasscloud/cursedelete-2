@@ -16,7 +16,7 @@ being repurposed. The authoritative source is
 | `4` | `LockResolutionFailed` | `--kill-locks` was requested and failed to free one or more locked objects. |
 | `5` | `RemoteLockHandlingFailed` | `--close-remote-locks` was requested and failed. |
 | `6` | `Interrupted` | The operation was interrupted (Ctrl+C) before it could finish. Partial results are still reported — see the `interrupted` field in [JSON_OUTPUT.md](JSON_OUTPUT.md). |
-| `7` | `LicenseRequired` | A capability that requires a valid license entitlement was requested without one — currently only `--close-remote-locks` (see [LICENSING.md](LICENSING.md)) and license activation/import/refresh failures. |
+| `7` | `LicenseRequired` | A capability that requires a valid license entitlement was requested without one — currently only `--close-remote-locks` (see [LICENSING.md](LICENSING.md)). Also returned by `cursdel license install|activate|deactivate|renew` when a licence is rejected or a licensing-server operation fails or is refused. |
 | `64` | `CliUsageError` | A generic CLI usage error: bad flag value, missing required argument, unparseable `--age`/`--workers`/size value, invalid glob pattern. This is the conventional BSD `EX_USAGE` value. |
 | `99` | `UnexpectedFatal` | An unexpected fatal error not covered by a more specific code (e.g. the license file could not be written to disk). |
 
@@ -67,8 +67,7 @@ $ echo $?
 
 $ cursdel /tmp --close-remote-locks
 Error: --close-remote-locks requires a Business or Enterprise licence.
-Run 'cursdel license status' for details, or 'cursdel license activate' to
-activate one.
+Run 'cursdel license status' for details.
 $ echo $?
 7
 ```

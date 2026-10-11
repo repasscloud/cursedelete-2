@@ -1,127 +1,146 @@
-//! Maps a verified licence entitlement to a resolved capability set.
+//! CurseDelete's application-specific licensing configuration -- the one
+//! place that decides product identity, which signing keys and algorithms
+//! this build trusts, where licences live, which licensing server to use,
+//! and which features each edition enables. `cursdel-license` supplies
+//! the product-agnostic mechanics; `cursdel-cli` consumes the result.
 //!
-//! The deletion engine (`cursdel-core`) never consumes this crate and
-//! never will: per the product brief, raw deletion speed and the core
-//! technical capabilities (adaptive/manual workers, `--force` remediation,
-//! retention, filters, dry-run, JSON output) are identical in every
-//! edition and are never gated here. `cursdel-cli` is the only consumer,
-//! and uses [`Capabilities`] for exactly two things: deciding whether
-//! `--close-remote-locks` may proceed (the one capability the product
-//! brief unambiguously reserves for Business/Enterprise), and annotating
-//! `license status`/`--json` output. Everything else the edition matrix
-//! lists (commercial use, organisational deployment, priority support) is
-//! a legal/licensing-terms distinction, not a technical gate -- enforcing
-//! those at runtime would make the tool worse per the brief's own
-//! guidance ("Commercial restrictions can be legal/licensing terms where
-//! technical enforcement would make the tool worse").
-//!
-//! Absent or invalid licensing always resolves to [`Capabilities::community`]
-//! -- fail *open* to the free tier, never fail closed to nothing. See
-//! `docs/LICENSING.md` for the full edition matrix and the reasoning
-//! behind the one ambiguous call this module makes (`--kill-locks`
-//! available in every edition despite the summary matrix's "Optional"
-//! wording for Community/Education -- see [`Capabilities`] docs).
+//! The deletion engine (`cursdel-core`) never consumes this crate: raw
+//! deletion speed and the core capabilities (adaptive/manual workers,
+//! `--force` remediation, retention, filters, dry-run, JSON output,
+//! `--kill-locks`) are identical in every edition. Commercial-use rights,
+//! deployment scale, and support are licensing terms, not runtime checks.
 
-use cursdel_license::ProductEntitlement;
+use cursdel_license::http::{HttpLicenseService, InsecureUrl};
+use cursdel_license::service::UnconfiguredService;
+use cursdel_license::{
+    Edition, LicenseLocations, LicensePolicy, LicenseService, ProductIdentity, SignatureAlgorithm,
+    StorageNames, TrustedKey, TrustedKeySet,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Edition {
-    Community,
-    Education,
-    Business,
-    Enterprise,
+pub const PRODUCT_ID: &str = "cursedelete";
+
+/// The licensed major version is this build's own Cargo major version.
+pub fn major_version() -> u32 {
+    env!("CARGO_PKG_VERSION_MAJOR")
+        .parse()
+        .expect("Cargo major version is numeric")
 }
 
-impl Edition {
-    /// Maps a licence's free-form `edition` string to CurseDelete's four
-    /// technical tiers. Unknown/unrecognised values fail closed to
-    /// [`Edition::Community`] -- an edition string that doesn't match
-    /// anything we know about must never accidentally grant more than the
-    /// free tier. `smb`/`corporate` (optional pricing-band SKUs from the
-    /// product brief §26) map onto their nearest technical tier
-    /// (`business`/`enterprise` respectively) since they carry the same
-    /// technical capabilities and differ only in seat/scale terms, which
-    /// this crate does not enforce.
-    pub fn from_license_str(edition: &str) -> Edition {
-        match edition.to_ascii_lowercase().as_str() {
-            "business" | "smb" | "project" => Edition::Business,
-            "enterprise" | "corporate" => Edition::Enterprise,
-            "education" => Edition::Education,
-            "community" | "consumer" => Edition::Community,
-            _ => Edition::Community,
+/// Every algorithm the library supports is permitted. Narrow this (e.g.
+/// to ECDSA-P256-SHA256 only) for a build that must accept FIPS-approved
+/// algorithms exclusively.
+pub const ALLOWED_ALGORITHMS: &[SignatureAlgorithm] = &[
+    SignatureAlgorithm::Ed25519,
+    SignatureAlgorithm::EcdsaP256Sha256,
+    SignatureAlgorithm::MlDsa65,
+];
+
+/// Public keys this v2 build trusts: `(keyId, algorithm, base64url public
+/// key)`. Add a key here only once the licensing server has published it
+/// and before it is used to issue CurseDelete v2 licences; keep a key for
+/// as long as licences it signed must keep working.
+///
+/// Intentionally empty: no production signing keys exist yet, and they
+/// are never generated in this repository. Until one is added, every
+/// licence is rejected as signed by an untrusted key and the application
+/// runs as Community -- fully functional apart from the gated features.
+const TRUSTED_KEYS: &[(&str, SignatureAlgorithm, &str)] = &[];
+
+pub const STORAGE: StorageNames = StorageNames {
+    vendor: "RePassCloud",
+    app: "CurseDelete",
+    unix_app: "cursedelete",
+    license_file_env: "CURSDEL_LICENSE_FILE",
+    license_dir_env: "CURSDEL_LICENSE_DIR",
+};
+
+/// Namespace for the hashed Business device id (see
+/// `cursdel_license::device`). Changing it changes every device id.
+pub const DEVICE_NAMESPACE: &str = "CurseDelete.DeviceIdentity.v1";
+
+/// Runtime override for the licensing server URL. A default can be baked
+/// in at build time by setting the same variable when compiling.
+pub const SERVER_URL_ENV: &str = "CURSDEL_LICENSE_SERVER_URL";
+
+pub fn trusted_keys() -> TrustedKeySet {
+    let keys = TRUSTED_KEYS
+        .iter()
+        .map(|(id, alg, key)| {
+            TrustedKey::from_base64url(*id, *alg, key).expect("embedded public key is valid")
+        })
+        .collect();
+    TrustedKeySet::new(keys).expect("embedded key ids are unique")
+}
+
+pub fn product() -> ProductIdentity {
+    ProductIdentity {
+        product_id: PRODUCT_ID.to_string(),
+        major_version: major_version(),
+    }
+}
+
+/// CurseDelete activates Business online once and then works offline
+/// indefinitely: activation certificates carry their own expiry if the
+/// server sets one, but there is no local refresh deadline. Portal
+/// deactivation therefore takes effect on this device only at its next
+/// successful `license renew` (see `docs/LICENSING.md`).
+pub fn license_policy() -> LicensePolicy {
+    LicensePolicy {
+        product: product(),
+        trusted_keys: trusted_keys(),
+        allowed_algorithms: ALLOWED_ALGORITHMS.to_vec(),
+        business_offline_limit: None,
+    }
+}
+
+pub fn locations() -> LicenseLocations {
+    LicenseLocations::for_app(&STORAGE, major_version())
+}
+
+/// The licensing server client: the runtime `CURSDEL_LICENSE_SERVER_URL`,
+/// else a URL baked in at build time, else none (offline licensing still
+/// works; online commands report that no server is configured).
+pub fn service() -> Result<Box<dyn LicenseService>, InsecureUrl> {
+    let url = std::env::var(SERVER_URL_ENV)
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .or_else(|| option_env!("CURSDEL_LICENSE_SERVER_URL").map(str::to_string));
+    Ok(match url {
+        Some(url) => Box::new(HttpLicenseService::new(&url)?),
+        None => Box::new(UnconfiguredService),
+    })
+}
+
+/// Features whose availability depends on the edition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feature {
+    /// `--close-remote-locks`: administratively closing remote SMB opens
+    /// on a Windows file server.
+    CloseRemoteLocks,
+}
+
+impl Feature {
+    pub const ALL: [Feature; 1] = [Feature::CloseRemoteLocks];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Feature::CloseRemoteLocks => "--close-remote-locks",
         }
     }
-}
 
-/// The resolved, technical capability set for one edition. See the module
-/// docs for what this is -- and is not -- used to gate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Capabilities {
-    pub edition: Edition,
-    /// Windows administrative closure of a remote SMB open
-    /// (`--close-remote-locks`). The one capability the product brief
-    /// unambiguously reserves: "Remote Windows `--close-remote-locks`" is
-    /// listed as `No | No | Yes | Yes` across Community/Education/
-    /// Business/Enterprise with no qualifier, unlike every other
-    /// capability in that matrix.
-    pub close_remote_locks: bool,
-    /// Structured audit/reporting beyond basic `--json` (e.g. richer
-    /// JSONL event streams, Windows Event Log integration) -- tracked for
-    /// future use; not yet gating any implemented output.
-    pub advanced_audit: bool,
-    /// Informational only: whether this edition's licence terms include
-    /// unattended/CI/scheduled automation rights. Not technically
-    /// enforced (see module docs).
-    pub unattended_automation_licensed: bool,
-    pub priority_support: bool,
-}
-
-impl Capabilities {
-    pub fn for_edition(edition: Edition) -> Self {
-        match edition {
-            Edition::Community => Capabilities {
-                edition,
-                close_remote_locks: false,
-                advanced_audit: false,
-                unattended_automation_licensed: false,
-                priority_support: false,
-            },
-            Edition::Education => Capabilities {
-                edition,
-                close_remote_locks: false,
-                advanced_audit: false,
-                unattended_automation_licensed: true,
-                priority_support: false,
-            },
-            Edition::Business => Capabilities {
-                edition,
-                close_remote_locks: true,
-                advanced_audit: true,
-                unattended_automation_licensed: true,
-                priority_support: false,
-            },
-            Edition::Enterprise => Capabilities {
-                edition,
-                close_remote_locks: true,
-                advanced_audit: true,
-                unattended_automation_licensed: true,
-                priority_support: true,
-            },
+    /// The edition feature table. Registered Community currently unlocks
+    /// nothing beyond unregistered Community.
+    pub fn is_enabled(self, edition: Edition) -> bool {
+        match self {
+            Feature::CloseRemoteLocks => matches!(edition, Edition::Business | Edition::Enterprise),
         }
     }
 
-    pub fn community() -> Self {
-        Self::for_edition(Edition::Community)
-    }
-
-    pub fn from_entitlement(entitlement: &ProductEntitlement) -> Self {
-        Self::for_edition(Edition::from_license_str(&entitlement.edition))
-    }
-}
-
-impl Default for Capabilities {
-    fn default() -> Self {
-        Self::community()
+    pub fn editions(self) -> Vec<Edition> {
+        Edition::ALL
+            .into_iter()
+            .filter(|e| self.is_enabled(*e))
+            .collect()
     }
 }
 
@@ -130,32 +149,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unknown_edition_string_fails_closed_to_community() {
+    fn major_version_matches_the_crate_version() {
         assert_eq!(
-            Edition::from_license_str("mystery-tier"),
-            Edition::Community
+            major_version().to_string(),
+            env!("CARGO_PKG_VERSION").split('.').next().unwrap()
         );
     }
 
     #[test]
-    fn recognises_all_four_core_editions_case_insensitively() {
-        assert_eq!(Edition::from_license_str("BUSINESS"), Edition::Business);
-        assert_eq!(Edition::from_license_str("Enterprise"), Edition::Enterprise);
-        assert_eq!(Edition::from_license_str("education"), Edition::Education);
-        assert_eq!(Edition::from_license_str("Community"), Edition::Community);
+    fn embedded_trusted_keys_are_valid_and_unique() {
+        // Panics if any embedded key is malformed or duplicated.
+        let keys = trusted_keys();
+        for key in keys.iter() {
+            assert!(ALLOWED_ALGORITHMS.contains(&key.algorithm()));
+        }
     }
 
     #[test]
-    fn only_business_and_enterprise_get_remote_lock_capability() {
-        assert!(!Capabilities::for_edition(Edition::Community).close_remote_locks);
-        assert!(!Capabilities::for_edition(Edition::Education).close_remote_locks);
-        assert!(Capabilities::for_edition(Edition::Business).close_remote_locks);
-        assert!(Capabilities::for_edition(Edition::Enterprise).close_remote_locks);
+    fn close_remote_locks_is_business_and_enterprise_only() {
+        assert_eq!(
+            Feature::CloseRemoteLocks.editions(),
+            vec![Edition::Business, Edition::Enterprise]
+        );
     }
 
     #[test]
-    fn default_and_community_are_the_same_fail_open_tier() {
-        assert_eq!(Capabilities::default(), Capabilities::community());
-        assert_eq!(Capabilities::default().edition, Edition::Community);
+    fn every_feature_is_enabled_for_enterprise() {
+        for f in Feature::ALL {
+            assert!(f.is_enabled(Edition::Enterprise), "{}", f.name());
+        }
+    }
+
+    #[test]
+    fn community_has_no_gated_features() {
+        for f in Feature::ALL {
+            assert!(!f.is_enabled(Edition::Community), "{}", f.name());
+        }
     }
 }

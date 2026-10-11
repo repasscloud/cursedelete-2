@@ -20,6 +20,18 @@ fn cursdel() -> Command {
     Command::cargo_bin("cursdel").expect("cursdel binary should build")
 }
 
+/// `cursdel` with every licence location redirected into `dir`, so no
+/// licence (or server URL) on the machine running the tests leaks in.
+fn cursdel_isolated(dir: &Path) -> Command {
+    let mut cmd = cursdel();
+    cmd.env("HOME", dir)
+        .env("XDG_CONFIG_HOME", dir.join(".config"))
+        .env("CURSDEL_LICENSE_DIR", dir.join("admin-licences"))
+        .env_remove("CURSDEL_LICENSE_FILE")
+        .env_remove("CURSDEL_LICENSE_SERVER_URL");
+    cmd
+}
+
 fn write_file(path: &Path, contents: &[u8]) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
@@ -469,13 +481,11 @@ fn close_remote_locks_without_license_is_rejected_before_touching_anything() {
     let root = dir.path().join("tree");
     write_file(&root.join("a.txt"), b"x");
 
-    // No license is activated in this test's isolated HOME/config, so this
+    // No license is installed in this test's isolated locations, so this
     // must be rejected as a license requirement rather than attempted.
-    cursdel()
+    cursdel_isolated(dir.path())
         .arg(&root)
         .arg("--close-remote-locks")
-        .env("HOME", dir.path())
-        .env("XDG_CONFIG_HOME", dir.path().join(".config"))
         .assert()
         .failure()
         .code(7)
@@ -532,61 +542,142 @@ fn long_version_flag_includes_build_and_platform_detail() {
 #[test]
 fn license_status_reports_community_when_unlicensed() {
     let dir = tempfile::tempdir().unwrap();
-    cursdel()
-        .arg("license")
-        .arg("status")
-        .env("HOME", dir.path())
-        .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+    cursdel_isolated(dir.path())
+        .args(["license", "status"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("Community (unregistered)"))
         .stdout(predicate::str::contains("Community capabilities"));
 }
 
-/// `cursdel license import` must reject a licence signed by a key outside
-/// the compiled-in trust store rather than blindly accepting any
-/// well-formed signed-looking file. The only real signed fixtures
-/// available (`crates/cursdel-license/tests/fixtures/*.license`) are
-/// signed with a disposable test key generated solely for byte-exact
-/// interop testing (see that crate's fixtures/README.md) -- deliberately
-/// *not* one of the production trust-store keys `cursdel-license` embeds,
-/// so running the real `import` command against one exercises exactly the
-/// "properly signed, but by an untrusted key" rejection path. This is the
-/// one import scenario testable without a real production-signed licence
-/// (see docs/adr/0004-licensing-integration.md's "not yet validated"
-/// note); the success path needs a real activation against a live server.
 #[test]
-fn license_import_rejects_a_license_signed_by_an_untrusted_key() {
-    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../cursdel-license/tests/fixtures/test.license");
-    assert!(
-        workspace_root.exists(),
-        "expected fixture at {}",
-        workspace_root.display()
-    );
+fn license_status_json_is_machine_readable() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = cursdel_isolated(dir.path())
+        .args(["license", "status", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(status["edition"], "community");
+    assert_eq!(status["registered"], false);
+    assert_eq!(status["product"]["productId"], "cursedelete");
+    assert_eq!(status["product"]["majorVersion"], 2);
+    assert_eq!(status["features"]["--close-remote-locks"], false);
+}
+
+/// A correctly signed licence from a key the shipped build does not
+/// trust (here a public test key; the production trust set is
+/// deliberately not test-extensible) must be rejected and not installed,
+/// and status must explain why it is not in use.
+#[test]
+fn license_install_rejects_a_license_signed_by_an_untrusted_key() {
+    use cursdel_license::envelope::EnvelopeKind;
+    use cursdel_license::testing::{license_claims, seal, TestSigner};
+    use cursdel_license::{Edition, SignatureAlgorithm};
 
     let dir = tempfile::tempdir().unwrap();
-    cursdel()
-        .arg("license")
-        .arg("import")
-        .arg(&workspace_root)
-        .env("HOME", dir.path())
-        .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+    let signer = TestSigner::new("test-only-key", SignatureAlgorithm::Ed25519, 1);
+    let licence = seal(
+        EnvelopeKind::License,
+        &license_claims("cursedelete", 2, Edition::Enterprise),
+        &[&signer],
+    );
+    let path = dir.path().join("enterprise.license");
+    fs::write(&path, &licence).unwrap();
+
+    for alias in ["install", "import"] {
+        cursdel_isolated(dir.path())
+            .args(["license", alias])
+            .arg(&path)
+            .assert()
+            .failure()
+            .code(7)
+            .stderr(predicate::str::contains("does not trust: test-only-key"));
+    }
+
+    // Dropped into the administrator directory instead, it is discovered,
+    // reported, and ignored -- deletion still works as Community.
+    write_file(
+        &dir.path().join("admin-licences/site.license"),
+        licence.as_bytes(),
+    );
+    cursdel_isolated(dir.path())
+        .args(["license", "status"])
         .assert()
-        .failure()
-        .code(7)
-        .stderr(predicate::str::contains("verification"));
+        .success()
+        .stdout(predicate::str::contains("Community (unregistered)"))
+        .stdout(predicate::str::contains("site.license"))
+        .stdout(predicate::str::contains("does not trust"));
 }
 
 #[test]
-fn license_import_reports_usage_error_for_missing_file() {
+fn license_install_rejects_a_corrupt_file() {
     let dir = tempfile::tempdir().unwrap();
-    cursdel()
-        .arg("license")
-        .arg("import")
+    let path = dir.path().join("broken.license");
+    fs::write(&path, "{ definitely not a licence").unwrap();
+    cursdel_isolated(dir.path())
+        .args(["license", "install"])
+        .arg(&path)
+        .assert()
+        .failure()
+        .code(7)
+        .stderr(predicate::str::contains("not a valid licence file"));
+}
+
+#[test]
+fn license_install_reports_usage_error_for_missing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    cursdel_isolated(dir.path())
+        .args(["license", "install"])
         .arg(dir.path().join("does-not-exist.license"))
         .assert()
         .failure()
         .code(64);
+}
+
+#[test]
+fn online_commands_explain_when_no_server_is_configured() {
+    let dir = tempfile::tempdir().unwrap();
+    cursdel_isolated(dir.path())
+        .args(["license", "activate", "KEY-123"])
+        .assert()
+        .failure()
+        .code(7)
+        .stderr(predicate::str::contains("none is configured"))
+        .stderr(predicate::str::contains("Nothing was changed"));
+}
+
+#[test]
+fn plain_http_licensing_server_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    cursdel_isolated(dir.path())
+        .env("CURSDEL_LICENSE_SERVER_URL", "http://licensing.example.com")
+        .args(["license", "activate", "KEY-123"])
+        .assert()
+        .failure()
+        .code(7)
+        .stderr(predicate::str::contains("https://"));
+}
+
+#[test]
+fn deactivate_and_renew_without_a_licence() {
+    let dir = tempfile::tempdir().unwrap();
+    cursdel_isolated(dir.path())
+        .args(["license", "deactivate"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No Business activation"));
+    for alias in ["renew", "refresh"] {
+        cursdel_isolated(dir.path())
+            .args(["license", alias])
+            .assert()
+            .failure()
+            .code(7)
+            .stderr(predicate::str::contains("no CurseDelete v2 licence"));
+    }
 }
 
 /// Interrupting a large operation partway through must exit with the

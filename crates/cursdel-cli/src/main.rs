@@ -180,15 +180,20 @@ fn run_delete(cli: Cli) -> ExitCode {
         None => None,
     };
 
-    if cli.close_remote_locks {
-        let capabilities = license_cmd::current_capabilities();
-        if !capabilities.close_remote_locks {
-            eprintln!(
-                "Error: --close-remote-locks requires a Business or Enterprise licence.\n\
-                 Run 'cursdel license status' for details, or 'cursdel license activate' to activate one."
-            );
-            return ExitCode::LicenseRequired;
-        }
+    let feature = cursdel_policy::Feature::CloseRemoteLocks;
+    if cli.close_remote_locks && !feature.is_enabled(license_cmd::current_edition()) {
+        let editions: Vec<&str> = feature
+            .editions()
+            .into_iter()
+            .map(|e| e.display_name())
+            .collect();
+        eprintln!(
+            "Error: {} requires a {} licence.\n\
+             Run 'cursdel license status' for details.",
+            feature.name(),
+            editions.join(" or ")
+        );
+        return ExitCode::LicenseRequired;
     }
 
     let filter_spec = FilterSpec {

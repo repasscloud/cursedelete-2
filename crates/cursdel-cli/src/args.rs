@@ -104,7 +104,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Manage CurseDelete's licence activation.
+    /// Manage CurseDelete's licence.
     License {
         #[command(subcommand)]
         action: LicenseAction,
@@ -113,33 +113,29 @@ pub enum Command {
 
 #[derive(Subcommand, Debug)]
 pub enum LicenseAction {
-    /// Show the current licence/activation status.
-    Status,
-    /// Activate a licence using a License ID and Activation Code from
-    /// your purchase email.
-    Activate {
+    /// Show which edition is in effect, and why.
+    Status {
+        /// Emit machine-readable JSON instead of text.
         #[arg(long)]
-        license_id: String,
-        #[arg(long)]
-        activation_code: String,
-        /// Write an offline activation request file instead of contacting
-        /// the licence server directly (for air-gapped machines).
-        #[arg(long)]
-        offline: bool,
-        /// Where to write the offline activation request file. Defaults
-        /// to `./offline-activation-request.json`.
-        #[arg(long, value_name = "PATH")]
-        output: Option<PathBuf>,
+        json: bool,
     },
-    /// Import a signed licence file received from an offline activation
-    /// (see `license activate --offline`).
-    Import {
+    /// Install a signed licence file (offline; no server contact).
+    #[command(alias = "import")]
+    Install {
         #[arg(value_name = "PATH")]
         license_file: PathBuf,
     },
-    /// Free this device's activation so the licence can be activated
-    /// elsewhere.
+    /// Activate online with an activation key. Business licences are
+    /// registered to this device; other editions are simply downloaded.
+    Activate {
+        #[arg(value_name = "KEY")]
+        activation_key: String,
+    },
+    /// Release this device's Business activation seat on the licensing
+    /// server.
     Deactivate,
-    /// Renew the current online activation lease.
-    Refresh,
+    /// Download the current signed licence (subscription renewal,
+    /// refreshed activation certificate).
+    #[command(alias = "refresh")]
+    Renew,
 }

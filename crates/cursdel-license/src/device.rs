@@ -1,56 +1,38 @@
-//! Local device identity for licence activation/verification.
+//! Local device identity for Business activation.
 //!
-//! The wire format only requires two things to interoperate with the
-//! server: the literal `scheme` string `"os-machine-id-sha256-v1"`
-//! (checked by `crate::schema`'s device-binding parsing, mirroring the
-//! server's own schema check), and a 64-character hex `deviceId`. The
-//! *hash formula* itself does not need to match `Licensing.Core`'s C#
-//! implementation byte-for-byte -- unlike the signature envelope, the
-//! device ID is an opaque, client-chosen value: the server only ever
-//! stores and echoes back whatever the client sent during activation, it
-//! never recomputes it. What matters is that this Rust implementation is
-//! deterministic per machine (so a later verification recomputes the same
-//! value that was sent at activation time) and that different machines
-//! produce different values with overwhelming probability (so a licence
-//! can't be silently reused elsewhere without an explicit deactivate/
-//! reactivate). See `docs/adr/0004-licensing-integration.md`.
+//! The device id is an opaque, privacy-preserving value: a SHA-256 hash
+//! of the OS's own stable machine identifier (Windows `MachineGuid`,
+//! Linux `/etc/machine-id`, macOS `IOPlatformUUID`) under an
+//! application-chosen namespace. It distinguishes installations without
+//! sending hardware details, hostnames, or personal information -- the
+//! raw identifier never leaves the machine. The licensing server only
+//! stores and compares it; it never needs to recompute it.
 //!
-//! This is also an opportunity to do *better* than the reference
-//! implementation on macOS: `Licensing.Core`'s own doc comments flag its
-//! macOS behaviour as a weak fallback to `Environment.MachineName` (a
-//! trivially user-changeable string). This implementation instead uses
-//! `IOPlatformUUID`, a real hardware-tied stable identifier that survives
-//! a user renaming their Mac and even most OS reinstalls.
+//! Only Business activation uses this. Community, Education, and
+//! Enterprise licences never compute or send a device id.
 
 use sha2::{Digest, Sha256};
 
-pub const DEVICE_SCHEME: &str = "os-machine-id-sha256-v1";
-const NAMESPACE: &str = "CurseDelete.DeviceIdentity.v1";
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalDeviceIdentity {
-    pub scheme: &'static str,
+    /// 64 uppercase hex characters.
     pub device_id: String,
-    pub device_name: String,
-    /// Which stable identifier was actually used. Explicit so a security
-    /// reviewer -- or a support agent debugging an activation issue -- can
-    /// see immediately whether this device is bound by a strong
-    /// (`*-machine-id`/`*-platform-uuid`) or weak (`machine-name-fallback`)
-    /// identifier.
+    /// Which stable identifier was used, e.g. `macos-platform-uuid`, or
+    /// `machine-name-fallback` when none was available (a weak binding,
+    /// shown by `license status` so support can recognise it).
     pub source: &'static str,
 }
 
-pub fn current() -> LocalDeviceIdentity {
+/// The identity of this machine under `namespace` (e.g.
+/// `"CurseDelete.DeviceIdentity.v1"`). Deterministic per machine and
+/// namespace, so different applications get unlinkable ids.
+pub fn current(namespace: &str) -> LocalDeviceIdentity {
     let (source, stable_value) = read_stable_identifier();
     let normalized = stable_value.trim().to_uppercase();
     let mut hasher = Sha256::new();
-    hasher.update(format!("{NAMESPACE}\n{source}\n{normalized}").as_bytes());
-    let digest = hasher.finalize();
-
+    hasher.update(format!("{namespace}\n{source}\n{normalized}").as_bytes());
     LocalDeviceIdentity {
-        scheme: DEVICE_SCHEME,
-        device_id: hex::encode_upper(digest),
-        device_name: hostname(),
+        device_id: hex::encode_upper(hasher.finalize()),
         source,
     }
 }
@@ -169,16 +151,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn produces_a_valid_64_char_hex_device_id() {
-        let identity = current();
-        assert_eq!(identity.scheme, DEVICE_SCHEME);
-        assert!(crate::schema::is_valid_device_id(&identity.device_id));
+    fn produces_a_64_char_uppercase_hex_device_id() {
+        let id = current("Test.v1").device_id;
+        assert_eq!(id.len(), 64);
+        assert!(id
+            .chars()
+            .all(|c| c.is_ascii_digit() || c.is_ascii_uppercase()));
     }
 
     #[test]
-    fn is_deterministic_across_calls_on_the_same_machine() {
-        let a = current();
-        let b = current();
-        assert_eq!(a.device_id, b.device_id);
+    fn is_deterministic_and_namespaced() {
+        assert_eq!(current("A.v1"), current("A.v1"));
+        assert_ne!(current("A.v1").device_id, current("B.v1").device_id);
     }
 }

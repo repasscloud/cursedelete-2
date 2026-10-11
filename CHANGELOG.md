@@ -9,6 +9,33 @@ source of truth; see `docs/RELEASE.md` for how a release is cut).
 
 ## [Unreleased]
 
+### Changed
+
+- **Licensing rewritten** to the cross-product architecture in
+  `docs/LICENSING-ARCHITECTURE.md` (see ADR-0010).
+  - `cursdel-license` is now product-agnostic, and `cursdel-policy` holds
+    CurseDelete's licensing configuration and edition → feature table.
+  - New signed envelope with detached signatures: Ed25519 (default),
+    ECDSA-P256-SHA256, and ML-DSA-65. Each key is bound to one algorithm,
+    each application has an allowlist, and licences can be dual-signed.
+  - Licences are per product and major version. Business activation is a
+    separate signed certificate.
+  - Licences are read from `CURSDEL_LICENSE_FILE`, a per-user
+    `…/CurseDelete/v2/` directory, and an administrator directory
+    (`CURSDEL_LICENSE_DIR` or the platform default).
+  - `cursdel license` is now `status [--json]`, `install` (alias
+    `import`), `activate <KEY>`, `deactivate`, and `renew` (alias
+    `refresh`). `activate --license-id/--activation-code/--offline` were
+    removed.
+  - The licensing server URL must be `https://` and has no default.
+  - **Breaking:** 2.0.0 `software-license-v1` licence files are no longer
+    accepted (CurseDelete falls back to Community).
+- Minimum supported Rust version raised to 1.85 (required by `ml-dsa`).
+
+### Security
+
+- `rustls` 0.23.43 → 0.23.45 (RUSTSEC-2026-0285).
+
 ## [2.0.0] - 2026-08-17
 
 ### Added

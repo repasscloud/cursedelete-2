@@ -43,7 +43,7 @@ cargo build --release -p cursdel-cli
 ./target/release/cursdel --version
 ```
 
-Requires a current stable Rust toolchain (`rust-version = "1.82"`). See
+Requires a current stable Rust toolchain (`rust-version = "1.85"`). See
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full build/test/lint
 workflow, and [docs/QUICKSTART.md](docs/QUICKSTART.md) for a guided first
 run.
@@ -197,10 +197,13 @@ edition. Commercial editions (Business, Enterprise) monetize commercial-use
 rights, scale, and support, not raw deletion speed; the only capability
 actually gated at runtime is `--close-remote-locks`. See
 [docs/LICENSING.md](docs/LICENSING.md) for the full edition model,
-`cursdel license` usage, and where credentials are stored. See
-[LICENSE](LICENSE) for the source code license, and
-[LICENSING-INTEGRATION.md](LICENSING-INTEGRATION.md) for the underlying
-license-verification protocol this implementation targets.
+`cursdel license` usage, offline use, and where licence files live.
+Licences are signed JSON files verified entirely offline (Ed25519 by
+default; ECDSA-P256 and post-quantum ML-DSA-65 are also supported), and
+are tied to a major version. Community needs no licence and no network.
+See [LICENSE](LICENSE) for the source code license, and
+[docs/LICENSING-ARCHITECTURE.md](docs/LICENSING-ARCHITECTURE.md) for the
+licensing architecture shared across RePassCloud products.
 
 Commercial licenses can be purchased at
 [repasscloud.com/products/cursedelete/#licensing](https://repasscloud.com/products/cursedelete/#licensing).

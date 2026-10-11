@@ -27,7 +27,7 @@ call it by its full path for now:
 ./target/release/cursdel --version
 ```
 
-Requires a current stable Rust toolchain (`rust-version = "1.82"`); see
+Requires a current stable Rust toolchain (`rust-version = "1.85"`); see
 [DEVELOPMENT.md](DEVELOPMENT.md) for build details and testing.
 
 ## Your first delete

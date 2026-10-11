@@ -1,26 +1,38 @@
-//! Rust-native, offline-capable verifier and activation client for the
-//! `software-license-v1` envelope defined by `danijeljw-RPC/licsense-server-poc`'s
-//! `Licensing.Core` package. See `LICENSING-INTEGRATION.md` for the full
-//! protocol and `docs/adr/0004-licensing-integration.md` for why this
-//! crate exists instead of a NativeAOT/sidecar bridge to the real .NET
-//! package.
+//! Product-agnostic application-side licensing.
+//!
+//! - [`envelope`]: the signed envelope (Ed25519, ECDSA-P256-SHA256,
+//!   ML-DSA-65; single or multiple signatures).
+//! - [`keys`]: an application build's explicitly chosen trusted keys.
+//! - [`claims`]: licence and Business activation-certificate claims.
+//! - [`validate`]: offline validation for one product and major version.
+//! - [`resolve`]: picking the effective licence from installed files.
+//! - [`store`]: per-platform, per-major-version licence locations.
+//! - [`service`] / [`http`]: the boundary to the licensing server.
+//!
+//! Nothing here knows about any particular application or which features
+//! an edition unlocks; each application supplies its own
+//! [`LicensePolicy`] and feature mapping. See
+//! `docs/LICENSING-ARCHITECTURE.md` for the architecture this implements.
 
-pub mod canonical_json;
-pub mod client;
+pub mod algorithm;
+pub mod claims;
 pub mod device;
-pub mod error;
-pub mod schema;
+pub mod edition;
+pub mod envelope;
+pub mod http;
+pub mod keys;
+pub mod resolve;
+pub mod service;
 pub mod store;
-pub mod trusted_keys;
-pub mod verify;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
+pub mod validate;
 
-pub use device::LocalDeviceIdentity;
-pub use error::{SchemaError, ValidationError};
-pub use schema::{ActivationData, DeviceBinding, LicenseData, ProductEntitlement};
-pub use verify::{validate_activation, validate_product, verify, verify_file, VerifiedLicense};
-
-/// The stable product code CurseDelete registers on the licence server and
-/// matches against every entitlement's `product` field. Fixed per the
-/// product brief -- do not change without a corresponding server-side
-/// product registration.
-pub const PRODUCT_CODE: &str = "cursedelete";
+pub use algorithm::SignatureAlgorithm;
+pub use claims::{ActivationClaims, LicenseClaims, Term};
+pub use edition::Edition;
+pub use keys::{TrustedKey, TrustedKeySet};
+pub use resolve::{resolve, ActiveLicense, Resolution};
+pub use service::{LicenseService, ServiceError};
+pub use store::{LicenseLocations, StorageNames};
+pub use validate::{LicensePolicy, ProductIdentity, Rejection, VerifiedLicense};

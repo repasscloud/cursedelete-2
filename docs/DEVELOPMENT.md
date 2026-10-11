@@ -6,14 +6,14 @@ behind the crate layout, see the [ADR index](adr/README.md).
 
 ## Requirements
 
-- Rust, edition 2021, `rust-version = "1.82"` (see the workspace
-  `Cargo.toml`). No `rust-toolchain.toml` is pinned in the repository as of
-  this writing — use a current stable toolchain via `rustup`.
-- No other runtime dependency (no .NET SDK, no external services) is
-  required to build or test the parts of the workspace that build on your
-  host OS — see [ADR-0004](adr/0004-licensing-integration.md) for why the
-  license verifier deliberately has no .NET dependency despite
-  interoperating with a .NET-based license server.
+- Rust, edition 2021, `rust-version = "1.85"` (see the workspace
+  `Cargo.toml`; 1.85 is required by the `ml-dsa` signature crate). No
+  `rust-toolchain.toml` is pinned in the repository as of this writing —
+  use a current stable toolchain via `rustup`.
+- No other runtime dependency (no external services, no licensing server)
+  is required to build or test the parts of the workspace that build on
+  your host OS. Licensing tests sign their own fixtures with test-only
+  keys — see [ADR-0010](adr/0010-licensing-v2.md).
 
 ## Building
 
@@ -43,10 +43,13 @@ crates/
 │                       No platform-specific code.
 ├── cursdel-cli/        the `cursdel` binary: argument parsing, wiring to
 │                       cursdel-core::pipeline, platform engine selection.
-├── cursdel-policy/     maps a verified license entitlement to a resolved
-│                       capability set. Never consumed by cursdel-core.
-├── cursdel-license/    offline license verification + online activation
-│                       client. No dependency on cursdel-core.
+├── cursdel-policy/     CurseDelete's licensing configuration: product id,
+│                       trusted keys, storage, server endpoint, edition →
+│                       feature table. Never consumed by cursdel-core.
+├── cursdel-license/    product-agnostic licensing: signed envelopes
+│                       (Ed25519 / ECDSA-P256 / ML-DSA-65), validation,
+│                       storage, and the licensing-server boundary.
+│                       No dependency on cursdel-core.
 ├── cursdel-macos/      native macOS deletion engine (implemented).
 ├── cursdel-windows/    native Windows deletion engine (implemented).
 └── cursdel-linux/      native Linux deletion engine (implemented).
@@ -89,10 +92,11 @@ rather than requiring real NVMe/HDD/SMB hardware in CI.
 cargo test --workspace
 ```
 
-This runs all unit and integration tests across every crate (179 passing
-as of this writing: 76 in `cursdel-core`, 49 in `cursdel-license`, 32 CLI
-integration tests in `cursdel-cli`, 18 in `cursdel-macos`, 4 in
-`cursdel-policy`; `cursdel-linux` and `cursdel-windows` currently run 0 of
+This runs all unit and integration tests across every crate (216 passing
+as of this writing: 78 in `cursdel-core`, 62 in `cursdel-license`, 37 CLI
+integration tests and 16 CLI unit tests in `cursdel-cli`, 18 in
+`cursdel-macos`, 5 in `cursdel-policy`; `cursdel-linux` and
+`cursdel-windows` currently run 0 of
 their own on a macOS host since both are `cfg`-gated to their target OS —
 their unit tests exist in source and run in CI on their native platform).
 The macOS and Windows engines' own test suites each include an end-to-end
@@ -109,8 +113,8 @@ real -- not fabricated -- results captured with it) exists at the
 workspace root. `tests/integration/` and `tests/destructive/`, referenced
 in the original architecture brief (`README.md#appendix-original-productarchitecture-brief`) as
 suggested locations for further destructive/integration coverage, remain
-empty placeholders beyond what `crates/cursdel-cli/tests/` and
-`crates/cursdel-license/tests/fixtures/` already provide -- the CLI
+empty placeholders beyond what `crates/cursdel-cli/tests/` already
+provides -- the CLI
 integration suite already exercises real destructive operations inside
 isolated `tempfile::tempdir()` roots, which is where the requirement
 ("destructive tests must run in isolated temporary test roots") is
@@ -178,11 +182,26 @@ equivalent to run before proposing a change.
 
 ## Licensing integration notes for contributors
 
-If you're changing anything under `crates/cursdel-license/`, read
-[ADR-0004](adr/0004-licensing-integration.md) first: the signature
-verification path must stay byte-exact with the .NET reference
-implementation's canonical JSON serialization, and the real C#-signed test
-fixtures under `crates/cursdel-license/tests/fixtures/` are what prove
-that, not synthetic Rust-to-Rust round trips. `docs/LICENSING.md` covers
-the user-facing behavior; `LICENSING-INTEGRATION.md` at the repository
-root is the underlying protocol specification this crate implements.
+Read [ADR-0010](adr/0010-licensing-v2.md) before changing licensing.
+In short:
+
+- `crates/cursdel-license/` must stay product-agnostic. Anything
+  CurseDelete-specific (product id, trusted keys, allowed algorithms,
+  storage names, feature table) belongs in `crates/cursdel-policy/`.
+- The file formats and the signed-bytes rule are specified in
+  [LICENSING-SERVER-CONTRACT.md](LICENSING-SERVER-CONTRACT.md). Issued
+  licences depend on them, so treat a format change as a schema-version
+  bump, never an in-place edit.
+- Tests build signed fixtures in-process with
+  `cursdel_license::testing::TestSigner` (deterministic, publicly-known
+  keys; the `test-support` feature, dev-dependencies only). Never add a
+  test key to `cursdel_policy::TRUSTED_KEYS`, never commit a private key,
+  and never add a runtime way to extend the trust set.
+- Adding a production public key: append `(keyId, algorithm,
+  base64url key)` to `TRUSTED_KEYS` once the licensing server has
+  published it. Keep a key for as long as licences it signed must keep
+  validating in this major version.
+
+[LICENSING.md](LICENSING.md) covers the user-facing behaviour, and
+[LICENSING-ARCHITECTURE.md](LICENSING-ARCHITECTURE.md) the cross-product
+architecture.
