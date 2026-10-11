@@ -38,6 +38,8 @@ pub enum Rejection {
     WrongMajorVersion { expected: u32, found: u32 },
     #[error("licence expired at {0}")]
     Expired(OffsetDateTime),
+    #[error("licence has been revoked")]
+    Revoked,
     #[error("Business licence is not activated on this device")]
     ActivationRequired,
     #[error("activation certificate is not valid: {0}")]

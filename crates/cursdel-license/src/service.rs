@@ -8,7 +8,8 @@
 //! [`crate::LicensePolicy`] before storing or using it.
 //!
 //! The wire contract implemented by [`crate::http::HttpLicenseService`] is
-//! **provisional** -- see `docs/LICENSING-SERVER-CONTRACT.md`.
+//! specified in `docs/LICENSING-SERVER-BRIEF.md` (§5), the document the
+//! licensing server is built against.
 
 /// A signed licence and, for Business, its signed activation certificate,
 /// both still unverified.

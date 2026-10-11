@@ -1,6 +1,6 @@
 # ADR-0010: Licensing v2 — product-agnostic, multi-algorithm, offline-first
 
-Status: Accepted. Supersedes [ADR-0004](0004-licensing-integration.md).
+Status: Accepted (CurseDelete 2.1.0). Supersedes [ADR-0004](0004-licensing-integration.md).
 
 ## Context
 
@@ -12,9 +12,9 @@ binding and online lease embedded *inside* the licence, and an HTTP
 client hard-wired to that server's API (defaulting to plain
 `http://localhost:8080`). Validation returned only "valid or not", so
 expired, wrong-product, untrusted-key and absent licences all looked the
-same. Licences lived in one per-user path, and `license import` would
-replace a valid licence with any validly signed file, even one for
-another product.
+same. Licences lived in one per-user path, `license import` would
+replace a valid licence with any validly signed file, and the Windows
+installers invoked a `license enroll` command that did not exist.
 
 [LICENSING-ARCHITECTURE.md](../LICENSING-ARCHITECTURE.md) now defines the
 licensing model for every RePassCloud application: four editions,
@@ -85,10 +85,11 @@ says the server authorised this device. Both are validated, and the
 licence's own term is always checked, so an old certificate cannot
 extend an expired subscription. CurseDelete sets
 `business_offline_limit: None`: activate online once, then work offline
-indefinitely. Revocation through the portal therefore reaches a device
-only at its next successful `renew`, and the docs say exactly that
-rather than promising remote revocation. Another application can set a
-limit to force periodic renewal.
+indefinitely. A portal release therefore reaches a device at its next
+`renew` (the server answers `activation_inactive` and the client removes
+the local activation), and the docs say exactly that rather than
+promising remote revocation. Another application can set a limit to
+force periodic renewal.
 
 The device id is the existing SHA-256-of-OS-machine-id scheme, now
 namespaced per application, with the hostname no longer sent.
@@ -100,73 +101,93 @@ Community/Education/Enterprise never compute it.
 licence (the highest valid edition) plus every rejected candidate with a
 `Rejection` reason: malformed, unsupported format/schema/algorithm,
 disallowed algorithm, untrusted key, invalid signature, wrong product,
-wrong major version, expired, activation required, or activation
-invalid. Revoked and server-unavailable are `ServiceError`s from online
-calls, because a local, offline check cannot know them. Nothing here
-stops deletion; the effective edition just falls back to Community.
+wrong major version, expired, revoked, activation required, or
+activation invalid. "Server unavailable" is a `ServiceError` from online
+calls. Nothing here stops deletion; the effective edition just falls
+back to Community.
 
-### 6. Per-major-version storage with an administrator directory
+**Revocation, when known** (architecture §5.7, §9.4): when `renew` gets
+`revoked`, the licence id is recorded in the scope's `revocations.json`,
+and resolution rejects that licence from then on. Administrators can
+list licence ids there too. An unsigned list is safe to honour because
+it can only remove entitlement. A later successful renewal or activation
+of the same licence clears the record.
 
-Licences are looked up, in precedence order, from `CURSDEL_LICENSE_FILE`,
-the per-user `…/v2/license.json`, and every `*.license`/`*.json` file in
-the administrator directory (`/etc/cursedelete/v2`,
-`/Library/Application Support/CurseDelete/v2`,
-`%ProgramData%\RePassCloud\CurseDelete\v2`, or `CURSDEL_LICENSE_DIR`).
-Per-major directories let v2 and v3 coexist on one machine. Writes are
-atomic (temp + rename). The client secret is `0600`. Nothing invalid is
-ever written, and a failed network call never removes or replaces local
-state.
+### 6. Per-major-version storage in two scopes
 
-### 7. Server boundary, no fake server
+All licence state lives in per-major-version directories (`…/v2/`), so v2
+and v3 coexist on one machine. There are two writable scopes:
+
+- **User** (default): `%LOCALAPPDATA%\RePassCloud\CurseDelete\v2`,
+  `~/Library/Application Support/CurseDelete/v2`, or
+  `~/.config/cursedelete/v2`.
+- **System** (`--system`, for installers and site-wide deployment):
+  `%ProgramData%\RePassCloud\CurseDelete\v2`,
+  `/Library/Application Support/CurseDelete/v2`, or `/etc/cursedelete/v2`
+  (or `CURSDEL_LICENSE_DIR`). Administrators may also drop `*.license` /
+  `*.json` files here by hand.
+
+Licences are read, in precedence order, from `--license-file` /
+`CURSDEL_LICENSE_FILE`, the user licence, then the system directory.
+Activation certificates and revocations are read from both scopes.
+Writes are atomic (temp + rename). The client secret is `0600` on Unix;
+on Windows a system-scope secret is restricted to SYSTEM and
+Administrators with `icacls`. Nothing invalid is ever written, and a
+failed network call never removes or replaces local state.
+
+The Windows installers take `/LICENSEFILE=` / `/ACTIVATIONKEY=` (Inno)
+and `LICENSEFILE` / `ACTIVATIONKEY` (MSI), running `license install
+--system` / `license activate --system`. A licensing problem never fails
+the install. This replaces the non-existent `license enroll
+--deploymentkey` call and the "grant Users Modify on `*.json` in Program
+Files" step, since nothing is written to the installation directory any
+more.
+
+### 7. Server boundary and handoff
 
 `LicenseService` (activate / renew / deactivate) isolates the network.
-`HttpLicenseService` implements a contract documented as **provisional**
-in [LICENSING-SERVER-CONTRACT.md](../LICENSING-SERVER-CONTRACT.md),
-requires `https://` (loopback `http://` excepted), and has no default
-URL. With no URL configured, `UnconfiguredService` makes online commands
-fail with a clear message while offline licensing keeps working. Tests
-use an in-process fake and deterministic, publicly-known test keys
-(`cursdel_license::testing`, behind the `test-support` feature); no
-temporary server was invented.
+`HttpLicenseService` implements the API in
+[LICENSING-SERVER-BRIEF.md](../LICENSING-SERVER-BRIEF.md). That document
+is the specification the replacement server is built against and is
+self-contained. It requires `https://` (loopback `http://` excepted) and
+has no default URL: the release workflow can bake one in from the
+`CURSDEL_LICENSE_SERVER_URL` repository variable. With no URL,
+`UnconfiguredService` makes online commands fail with a clear message
+while offline licensing keeps working.
 
-### 8. The production trust set ships empty
+Tests use an in-process fake and deterministic, publicly-known test keys
+(`cursdel_license::testing`, behind the `test-support` feature). The
+brief embeds deterministic test vectors for all three algorithms, which
+a unit test regenerates and verifies so they can't drift. The
+`conformance` example lets the server team validate their output with
+the real client code.
 
-No production signing keys exist yet, and per the architecture they are
-never generated in an application repository. Until the licensing server
-publishes keys and they are added to `cursdel_policy::TRUSTED_KEYS`,
-every licence is rejected as untrusted and CurseDelete runs as
-Community. The trust set is compile-time only. There is deliberately no
-environment variable or file that adds trusted keys at runtime, because
-that would let anyone mint their own licences.
+### 8. Trusted keys are public keys in source
 
-## Consequences and migration
+The licensing server owns every private key. Public keys are added to
+`cursdel_policy::TRUSTED_KEYS` as `(keyId, algorithm, base64url key)`
+when the server publishes them, and kept for as long as licences they
+signed must keep validating in this major version. The trust set is
+compile-time only. There is deliberately no environment variable or file
+that adds trusted keys at runtime, because that would let anyone mint
+their own licences. The list is empty until the new server generates
+its first keys; until then every licence is reported as signed by an
+untrusted key, and CurseDelete runs as Community.
 
-- **Old licences stop working.** `software-license-v1` / ECDSA-P256-over-
-  canonical-JSON files and the P-256 keys `primary-2026` /
-  `secondary-2026` are no longer accepted. Such a file is reported by
-  `license status` as an unusable licence file and CurseDelete runs as
-  Community, which is never a crash. v2.0.0 shipped with the old format,
-  but its signing server was a proof of concept, so this change assumes
-  no customer licences were issued in it and keeps no compatibility
-  shim. **If any were, they need reissuing in the new format, or a
-  verify-only legacy path has to be added before release.** That is an
-  open release decision.
-- **Versioning.** The `license` CLI changes below break scripts written
-  against 2.0.0's syntax. Shipping this as 2.x keeps licences tied to
-  major version 2 (none have been issued in the new format yet), at the
-  cost of a CLI break inside a major version; shipping it as 3.0 would
-  make every licence a v3 licence. Also an open release decision.
-- **CLI changes.** `activate --license-id … --activation-code …` became
-  `activate <KEY>`. `activate --offline` / `--output` are gone: Business
-  needs online activation (architecture §4.1), and every other edition
-  installs a file offline. `import` is now `install` (`import` remains
-  an alias), and `refresh` is now `renew` (alias kept). `status --json`
-  is new.
-- **Storage moved** from `…/CurseDelete/license.json` +
-  `activation.json` to `…/CurseDelete/v2/`. Old files are ignored.
+## Consequences
+
+- Shipped as **2.1.0**. 2.0.0's `software-license-v1` licences were test
+  licences only and are not supported. Such a file shows in
+  `license status` as a licence file not in use.
+- **CLI:** `license status [--json] | install | activate <KEY> | deactivate |
+  renew`, with `--system` on the write commands and a global
+  `--license-file`. `import`/`refresh` remain as aliases. The 2.0.0 flags
+  `activate --license-id/--activation-code/--offline/--output` are gone:
+  Business needs online activation (architecture §4.1), and every other
+  edition installs a file offline.
 - **Edition strings are exact.** The old `smb`/`project`/`corporate`/
   `consumer` aliases are gone; pricing bands are a server/Stripe concern.
-- **MSRV** is now Rust 1.85.
+- **MSRV** is Rust 1.85.
 - `deny.toml` needed no new licence allowances: `ed25519-dalek`/
   `curve25519-dalek` are BSD-3-Clause, and `ml-dsa`/`p256` are MIT OR
   Apache-2.0.

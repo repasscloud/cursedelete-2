@@ -100,6 +100,11 @@ pub struct Cli {
     /// Also write the report to this file (in addition to stdout/stderr).
     #[arg(long, value_name = "PATH")]
     pub log: Option<PathBuf>,
+
+    /// Use this licence file in addition to the installed ones (same as
+    /// setting CURSDEL_LICENSE_FILE). Never modified.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub license_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -123,19 +128,37 @@ pub enum LicenseAction {
     #[command(alias = "import")]
     Install {
         #[arg(value_name = "PATH")]
-        license_file: PathBuf,
+        path: PathBuf,
+        #[command(flatten)]
+        scope: ScopeArg,
     },
     /// Activate online with an activation key. Business licences are
     /// registered to this device; other editions are simply downloaded.
     Activate {
         #[arg(value_name = "KEY")]
         activation_key: String,
+        #[command(flatten)]
+        scope: ScopeArg,
     },
     /// Release this device's Business activation seat on the licensing
     /// server.
-    Deactivate,
+    Deactivate {
+        #[command(flatten)]
+        scope: ScopeArg,
+    },
     /// Download the current signed licence (subscription renewal,
-    /// refreshed activation certificate).
+    /// refreshed activation certificate, revocation status).
     #[command(alias = "refresh")]
-    Renew,
+    Renew {
+        #[command(flatten)]
+        scope: ScopeArg,
+    },
+}
+
+#[derive(clap::Args, Debug, Clone, Copy)]
+pub struct ScopeArg {
+    /// Act on the machine-wide licence store (for all users; requires
+    /// administrator/root) instead of the current user's.
+    #[arg(long)]
+    pub system: bool,
 }

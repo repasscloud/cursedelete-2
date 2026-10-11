@@ -8,8 +8,9 @@
 > remains the default, alongside ECDSA-P256-SHA256 and ML-DSA-65, with
 > one algorithm per keypair. How CurseDelete implements this is in
 > [ADR-0010](adr/0010-licensing-v2.md), the user-facing behaviour is in
-> [LICENSING.md](LICENSING.md), and the provisional application↔server
-> contract is in [LICENSING-SERVER-CONTRACT.md](LICENSING-SERVER-CONTRACT.md).
+> [LICENSING.md](LICENSING.md), and the application↔server contract and
+> server implementation brief are in
+> [LICENSING-SERVER-BRIEF.md](LICENSING-SERVER-BRIEF.md).
 
 ## PURPOSE
 

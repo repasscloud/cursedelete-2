@@ -1,28 +1,36 @@
-//! Where licences and Business activation state live on disk.
+//! Where licences, Business activation state, and locally known
+//! revocations live on disk.
 //!
-//! Each major version has its own directories, so v2 and v3 of the same
-//! application installed side by side never overwrite each other's
-//! licences. Candidate licences are read, in precedence order, from:
+//! There are two writable scopes, each with its own directory per major
+//! version (so v2 and v3 installed side by side never touch each other's
+//! licences):
 //!
-//! 1. an explicit file named by the application's `*_LICENSE_FILE`
-//!    environment variable (installer / automation / admin override);
-//! 2. the per-user licence written by `install`/`activate`/`renew`;
-//! 3. every `*.license` / `*.json` file in the administrator-managed
-//!    directory (the platform default below, or the directory named by the
-//!    application's `*_LICENSE_DIR` environment variable). The application
-//!    only ever reads from here.
+//! - [`Scope::User`]: the per-user directory. The default for interactive
+//!   use and needs no privileges.
+//! - [`Scope::System`]: the machine-wide, administrator-managed directory.
+//!   Used by installers and site-wide deployment. Administrators may also
+//!   drop licence files in here by hand.
 //!
-//! | Platform | Per-user directory | Administrator directory |
+//! | Platform | User directory | System directory |
 //! |---|---|---|
 //! | Windows | `%LOCALAPPDATA%\<Vendor>\<App>\v<N>` | `%ProgramData%\<Vendor>\<App>\v<N>` |
 //! | macOS | `~/Library/Application Support/<App>/v<N>` | `/Library/Application Support/<App>/v<N>` |
 //! | Linux | `$XDG_CONFIG_HOME/<app>/v<N>` | `/etc/<app>/v<N>` |
 //!
-//! Business activation state (the signed certificate and the client
-//! secret used to renew/deactivate it) is per-user, alongside the user
-//! licence. The client secret is written owner-only (`0600` on Unix).
-//! Every write goes to a temporary file first and is renamed into place,
-//! so a crash or full disk never leaves a half-written licence.
+//! The system directory can be replaced with the application's
+//! `*_LICENSE_DIR` environment variable. Candidate licences are read, in
+//! precedence order, from: an explicit override file (`*_LICENSE_FILE` or
+//! a CLI flag), the user `license.json`, then every `*.license`/`*.json`
+//! file in the system directory except the reserved state files below.
+//!
+//! Each scope directory may also hold `activation.json` (a signed Business
+//! activation certificate), `credentials.json` (its client secret), and
+//! `revocations.json` (licence ids known to be revoked). The client secret
+//! is owner-only (`0600`) on Unix; on Windows a system-scope secret is
+//! restricted to SYSTEM and Administrators, while the user directory
+//! already inherits owner-only ACLs from the profile. Every write goes to a
+//! temporary file and is renamed into place, so an interrupted write never
+//! leaves a half-written file.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -44,15 +52,30 @@ pub struct StorageNames {
     pub unix_app: &'static str,
     /// Environment variable naming one explicit licence file.
     pub license_file_env: &'static str,
-    /// Environment variable replacing the administrator directory.
+    /// Environment variable replacing the system directory.
     pub license_dir_env: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    User,
+    System,
+}
+
+impl Scope {
+    pub fn name(self) -> &'static str {
+        match self {
+            Scope::User => "user",
+            Scope::System => "system",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LicenseLocations {
     pub override_file: Option<PathBuf>,
     pub user_dir: PathBuf,
-    pub admin_dir: Option<PathBuf>,
+    pub system_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,9 +87,32 @@ pub struct ActivationCredentials {
     pub client_secret: String,
 }
 
+/// A Business activation certificate found on disk, with its scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredActivation {
+    pub scope: Scope,
+    pub certificate: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Revocations {
+    revoked_license_ids: Vec<String>,
+}
+
 const LICENSE_FILE: &str = "license.json";
 const ACTIVATION_FILE: &str = "activation.json";
 const CREDENTIALS_FILE: &str = "credentials.json";
+const REVOCATIONS_FILE: &str = "revocations.json";
+/// State files that share the system directory with licence files and
+/// must never be read as candidate licences.
+const RESERVED: &[&str] = &[ACTIVATION_FILE, CREDENTIALS_FILE, REVOCATIONS_FILE];
+
+#[derive(Clone, Copy)]
+enum Secrecy {
+    Public,
+    Secret(Scope),
+}
 
 impl LicenseLocations {
     /// The platform locations for `names` and `major_version`, honouring
@@ -81,21 +127,34 @@ impl LicenseLocations {
         Self {
             override_file: non_empty_env(names.license_file_env),
             user_dir: user_base(names).join(&version_dir),
-            admin_dir: non_empty_env(names.license_dir_env)
-                .or_else(|| admin_base(names).map(|d| d.join(&version_dir))),
+            system_dir: non_empty_env(names.license_dir_env)
+                .or_else(|| system_base(names).map(|d| d.join(&version_dir))),
         }
     }
 
-    pub fn user_license_file(&self) -> PathBuf {
-        self.user_dir.join(LICENSE_FILE)
+    pub fn dir(&self, scope: Scope) -> io::Result<&Path> {
+        match scope {
+            Scope::User => Ok(&self.user_dir),
+            Scope::System => self.system_dir.as_deref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "no system licence directory is available on this platform",
+                )
+            }),
+        }
     }
 
-    pub fn activation_file(&self) -> PathBuf {
-        self.user_dir.join(ACTIVATION_FILE)
+    fn file(&self, scope: Scope, name: &str) -> io::Result<PathBuf> {
+        Ok(self.dir(scope)?.join(name))
     }
 
-    pub fn credentials_file(&self) -> PathBuf {
-        self.user_dir.join(CREDENTIALS_FILE)
+    /// Where `install`/`activate`/`renew` write a licence in `scope`.
+    pub fn license_file(&self, scope: Scope) -> io::Result<PathBuf> {
+        self.file(scope, LICENSE_FILE)
+    }
+
+    pub fn credentials_file(&self, scope: Scope) -> io::Result<PathBuf> {
+        self.file(scope, CREDENTIALS_FILE)
     }
 
     /// Every candidate licence file, in precedence order. Missing files
@@ -106,35 +165,59 @@ impl LicenseLocations {
         if let Some(path) = &self.override_file {
             out.push(read_candidate(path));
         }
-        let user = self.user_license_file();
-        if user.exists() {
-            out.push(read_candidate(&user));
-        }
-        if let Some(dir) = &self.admin_dir {
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                let mut files: Vec<PathBuf> = entries
-                    .filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| {
-                        p.is_file()
-                            && matches!(
-                                p.extension().and_then(|e| e.to_str()),
-                                Some("license" | "json")
-                            )
-                    })
-                    .collect();
-                files.sort();
-                out.extend(files.iter().map(|p| read_candidate(p)));
-            }
-        }
+        out.extend(self.candidates_in(Scope::User));
+        out.extend(self.candidates_in(Scope::System));
         out
     }
 
-    pub fn read_activation_certificate(&self) -> io::Result<Option<String>> {
-        read_optional(&self.activation_file())
+    /// Candidate licences stored in one scope (no override file).
+    pub fn candidates_in(&self, scope: Scope) -> Vec<Candidate> {
+        let Ok(dir) = self.dir(scope) else {
+            return Vec::new();
+        };
+        if scope == Scope::User {
+            let path = dir.join(LICENSE_FILE);
+            return if path.exists() {
+                vec![read_candidate(&path)]
+            } else {
+                Vec::new()
+            };
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                p.is_file()
+                    && !RESERVED.contains(&name)
+                    && !name.starts_with('.')
+                    && matches!(
+                        p.extension().and_then(|e| e.to_str()),
+                        Some("license" | "json")
+                    )
+            })
+            .collect();
+        files.sort();
+        files.iter().map(|p| read_candidate(p)).collect()
     }
 
-    pub fn read_credentials(&self) -> io::Result<Option<ActivationCredentials>> {
-        read_optional(&self.credentials_file())?
+    /// Activation certificates from both scopes, user first. Unreadable
+    /// files are skipped: a missing certificate only means "not activated".
+    pub fn activation_certificates(&self) -> Vec<StoredActivation> {
+        [Scope::User, Scope::System]
+            .into_iter()
+            .filter_map(|scope| {
+                let path = self.file(scope, ACTIVATION_FILE).ok()?;
+                let certificate = read_optional(&path).ok()??;
+                Some(StoredActivation { scope, certificate })
+            })
+            .collect()
+    }
+
+    pub fn read_credentials(&self, scope: Scope) -> io::Result<Option<ActivationCredentials>> {
+        read_optional(&self.file(scope, CREDENTIALS_FILE)?)?
             .map(|text| {
                 serde_json::from_str(&text)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
@@ -143,25 +226,91 @@ impl LicenseLocations {
     }
 
     /// Callers must validate `signed_license` before installing it.
-    pub fn write_user_license(&self, signed_license: &str) -> io::Result<()> {
-        write_atomic(&self.user_license_file(), signed_license.as_bytes(), false)
+    pub fn write_license(&self, scope: Scope, signed_license: &str) -> io::Result<()> {
+        write_atomic(
+            &self.license_file(scope)?,
+            signed_license.as_bytes(),
+            Secrecy::Public,
+        )
     }
 
     /// Callers must validate `certificate` before installing it.
     pub fn write_activation(
         &self,
+        scope: Scope,
         certificate: &str,
         credentials: &ActivationCredentials,
     ) -> io::Result<()> {
         let creds = serde_json::to_vec_pretty(credentials)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        write_atomic(&self.credentials_file(), &creds, true)?;
-        write_atomic(&self.activation_file(), certificate.as_bytes(), false)
+        write_atomic(
+            &self.file(scope, CREDENTIALS_FILE)?,
+            &creds,
+            Secrecy::Secret(scope),
+        )?;
+        write_atomic(
+            &self.file(scope, ACTIVATION_FILE)?,
+            certificate.as_bytes(),
+            Secrecy::Public,
+        )
     }
 
-    pub fn remove_activation(&self) -> io::Result<()> {
-        remove_if_exists(&self.activation_file())?;
-        remove_if_exists(&self.credentials_file())
+    pub fn remove_activation(&self, scope: Scope) -> io::Result<()> {
+        remove_if_exists(&self.file(scope, ACTIVATION_FILE)?)?;
+        remove_if_exists(&self.file(scope, CREDENTIALS_FILE)?)
+    }
+
+    /// Licence ids recorded as revoked in either scope -- by this
+    /// application after the server reported a revocation, or by an
+    /// administrator (`{"revokedLicenseIds": [...]}` in the system
+    /// directory). An unsigned list is safe to honour because it can only
+    /// take entitlement away. Unreadable or malformed files are ignored.
+    pub fn revoked_license_ids(&self) -> Vec<String> {
+        [Scope::User, Scope::System]
+            .into_iter()
+            .filter_map(|scope| self.read_revocations(scope).ok())
+            .flat_map(|r| r.revoked_license_ids)
+            .collect()
+    }
+
+    pub fn record_revocation(&self, scope: Scope, license_id: &str) -> io::Result<()> {
+        let mut r = self.read_revocations(scope).unwrap_or_default();
+        if !r.revoked_license_ids.iter().any(|id| id == license_id) {
+            r.revoked_license_ids.push(license_id.to_string());
+            self.write_revocations(scope, &r)?;
+        }
+        Ok(())
+    }
+
+    /// Undo a recorded revocation after the server issued a fresh licence.
+    pub fn clear_revocation(&self, scope: Scope, license_id: &str) -> io::Result<()> {
+        let Ok(mut r) = self.read_revocations(scope) else {
+            return Ok(());
+        };
+        let before = r.revoked_license_ids.len();
+        r.revoked_license_ids.retain(|id| id != license_id);
+        if r.revoked_license_ids.len() != before {
+            self.write_revocations(scope, &r)?;
+        }
+        Ok(())
+    }
+
+    fn read_revocations(&self, scope: Scope) -> io::Result<Revocations> {
+        match read_optional(&self.file(scope, REVOCATIONS_FILE)?)? {
+            Some(text) => serde_json::from_str(&text)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+            None => Ok(Revocations::default()),
+        }
+    }
+
+    fn write_revocations(&self, scope: Scope, r: &Revocations) -> io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(r)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        write_atomic(
+            &self.file(scope, REVOCATIONS_FILE)?,
+            &bytes,
+            Secrecy::Public,
+        )
     }
 }
 
@@ -195,7 +344,7 @@ fn remove_if_exists(path: &Path) -> io::Result<()> {
     }
 }
 
-fn write_atomic(path: &Path, bytes: &[u8], secret: bool) -> io::Result<()> {
+fn write_atomic(path: &Path, bytes: &[u8], secrecy: Secrecy) -> io::Result<()> {
     use std::io::Write;
     let parent = path
         .parent()
@@ -206,6 +355,8 @@ fn write_atomic(path: &Path, bytes: &[u8], secret: bool) -> io::Result<()> {
         path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
         std::process::id()
     ));
+    #[cfg(unix)]
+    let secret = matches!(secrecy, Secrecy::Secret(_));
 
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
@@ -223,17 +374,51 @@ fn write_atomic(path: &Path, bytes: &[u8], secret: bool) -> io::Result<()> {
             use std::os::unix::fs::PermissionsExt;
             file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
+        // Restrict before any secret bytes are written.
+        if let Secrecy::Secret(Scope::System) = secrecy {
+            restrict_to_administrators(&tmp)?;
+        }
         file.write_all(bytes)?;
         file.sync_all()?;
+        drop(file);
         std::fs::rename(&tmp, path)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
-    // Windows: the per-user directory inherits owner-only ACLs from the
-    // user profile; `secret` needs no extra handling there.
-    let _ = secret;
     result
+}
+
+/// Windows: replace the inherited ACL (ProgramData grants Users read) with
+/// full control for SYSTEM (S-1-5-18) and Administrators (S-1-5-32-544)
+/// only. Well-known SIDs avoid localised group names. Elsewhere `0600`
+/// already limits the file to its (root) owner.
+#[cfg(windows)]
+fn restrict_to_administrators(path: &Path) -> io::Result<()> {
+    let status = std::process::Command::new("icacls")
+        .arg(path)
+        .args([
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-18:F",
+            "*S-1-5-32-544:F",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "could not restrict the credentials file to administrators (icacls failed)",
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+fn restrict_to_administrators(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn user_base(names: &StorageNames) -> PathBuf {
@@ -249,7 +434,7 @@ fn user_base(names: &StorageNames) -> PathBuf {
     }
 }
 
-fn admin_base(names: &StorageNames) -> Option<PathBuf> {
+fn system_base(names: &StorageNames) -> Option<PathBuf> {
     if cfg!(windows) {
         std::env::var_os("ProgramData").map(|d| PathBuf::from(d).join(names.vendor).join(names.app))
     } else if cfg!(target_os = "macos") {
@@ -267,7 +452,14 @@ mod tests {
         LicenseLocations {
             override_file: None,
             user_dir: dir.join("user/v2"),
-            admin_dir: Some(dir.join("admin")),
+            system_dir: Some(dir.join("system")),
+        }
+    }
+
+    fn creds(id: &str) -> ActivationCredentials {
+        ActivationCredentials {
+            activation_id: id.into(),
+            client_secret: generate_client_secret(),
         }
     }
 
@@ -278,25 +470,29 @@ mod tests {
     }
 
     #[test]
-    fn candidates_are_in_precedence_order() {
+    fn candidates_are_in_precedence_order_and_skip_state_files() {
         let dir = tempfile::tempdir().unwrap();
         let loc = LicenseLocations {
             override_file: Some(dir.path().join("explicit.license")),
             ..locations(dir.path())
         };
         std::fs::write(dir.path().join("explicit.license"), "e").unwrap();
-        loc.write_user_license("u").unwrap();
-        std::fs::create_dir_all(dir.path().join("admin")).unwrap();
-        std::fs::write(dir.path().join("admin/b.license"), "b").unwrap();
-        std::fs::write(dir.path().join("admin/a.json"), "a").unwrap();
-        std::fs::write(dir.path().join("admin/readme.txt"), "ignored").unwrap();
+        loc.write_license(Scope::User, "u").unwrap();
+        loc.write_license(Scope::System, "s").unwrap();
+        loc.write_activation(Scope::System, "cert", &creds("a"))
+            .unwrap();
+        loc.record_revocation(Scope::System, "lic_x").unwrap();
+        let sys = dir.path().join("system");
+        std::fs::write(sys.join("b.license"), "b").unwrap();
+        std::fs::write(sys.join("a.json"), "a").unwrap();
+        std::fs::write(sys.join("readme.txt"), "ignored").unwrap();
 
         let got: Vec<String> = loc
             .candidates()
             .into_iter()
             .map(|c| c.contents.unwrap())
             .collect();
-        assert_eq!(got, vec!["e", "u", "a", "b"]);
+        assert_eq!(got, vec!["e", "u", "a", "b", "s"]);
     }
 
     #[test]
@@ -312,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn major_versions_use_separate_user_directories() {
+    fn major_versions_use_separate_directories() {
         let names = StorageNames {
             vendor: "V",
             app: "App",
@@ -323,39 +519,89 @@ mod tests {
         let v2 = LicenseLocations::for_app(&names, 2);
         let v3 = LicenseLocations::for_app(&names, 3);
         assert!(v2.user_dir.ends_with("v2"));
-        assert_ne!(v2.user_license_file(), v3.user_license_file());
+        assert_ne!(
+            v2.license_file(Scope::User).unwrap(),
+            v3.license_file(Scope::User).unwrap()
+        );
+        if let (Some(a), Some(b)) = (&v2.system_dir, &v3.system_dir) {
+            assert_ne!(a, b);
+        }
     }
 
     #[test]
-    fn activation_round_trips_and_is_removed() {
+    fn activation_round_trips_per_scope_and_is_removed() {
         let dir = tempfile::tempdir().unwrap();
         let loc = locations(dir.path());
-        let creds = ActivationCredentials {
-            activation_id: "act_1".into(),
-            client_secret: generate_client_secret(),
-        };
-        loc.write_activation("cert", &creds).unwrap();
+        let user = creds("act_user");
+        loc.write_activation(Scope::User, "cert-u", &user).unwrap();
+        loc.write_activation(Scope::System, "cert-s", &creds("act_sys"))
+            .unwrap();
         assert_eq!(
-            loc.read_activation_certificate().unwrap().as_deref(),
-            Some("cert")
+            loc.activation_certificates(),
+            vec![
+                StoredActivation {
+                    scope: Scope::User,
+                    certificate: "cert-u".into()
+                },
+                StoredActivation {
+                    scope: Scope::System,
+                    certificate: "cert-s".into()
+                },
+            ]
         );
-        assert_eq!(loc.read_credentials().unwrap(), Some(creds));
-        loc.remove_activation().unwrap();
-        assert_eq!(loc.read_activation_certificate().unwrap(), None);
-        assert_eq!(loc.read_credentials().unwrap(), None);
-        loc.remove_activation().unwrap();
+        assert_eq!(loc.read_credentials(Scope::User).unwrap(), Some(user));
+        loc.remove_activation(Scope::User).unwrap();
+        assert_eq!(loc.read_credentials(Scope::User).unwrap(), None);
+        assert_eq!(loc.activation_certificates().len(), 1);
+        loc.remove_activation(Scope::User).unwrap();
+    }
+
+    #[test]
+    fn revocations_are_recorded_merged_and_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let loc = locations(dir.path());
+        loc.record_revocation(Scope::User, "lic_a").unwrap();
+        loc.record_revocation(Scope::User, "lic_a").unwrap();
+        loc.record_revocation(Scope::System, "lic_b").unwrap();
+        assert_eq!(loc.revoked_license_ids(), vec!["lic_a", "lic_b"]);
+        loc.clear_revocation(Scope::User, "lic_a").unwrap();
+        assert_eq!(loc.revoked_license_ids(), vec!["lic_b"]);
+    }
+
+    #[test]
+    fn administrator_revocation_list_format_is_honoured_and_malformed_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let loc = locations(dir.path());
+        std::fs::create_dir_all(dir.path().join("system")).unwrap();
+        std::fs::write(
+            dir.path().join("system/revocations.json"),
+            r#"{"revokedLicenseIds": ["lic_admin"]}"#,
+        )
+        .unwrap();
+        assert_eq!(loc.revoked_license_ids(), vec!["lic_admin"]);
+        std::fs::write(dir.path().join("system/revocations.json"), "garbage").unwrap();
+        assert!(loc.revoked_license_ids().is_empty());
+    }
+
+    #[test]
+    fn no_system_directory_is_an_error_not_a_panic() {
+        let loc = LicenseLocations {
+            override_file: None,
+            user_dir: PathBuf::from("u"),
+            system_dir: None,
+        };
+        assert!(loc.write_license(Scope::System, "x").is_err());
+        assert!(loc.candidates_in(Scope::System).is_empty());
     }
 
     #[test]
     fn rewriting_replaces_contents_and_leaves_no_temp_files() {
         let dir = tempfile::tempdir().unwrap();
         let loc = locations(dir.path());
-        loc.write_user_license("first").unwrap();
-        loc.write_user_license("second").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(loc.user_license_file()).unwrap(),
-            "second"
-        );
+        loc.write_license(Scope::User, "first").unwrap();
+        loc.write_license(Scope::User, "second").unwrap();
+        let path = loc.license_file(Scope::User).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
         let names: Vec<_> = std::fs::read_dir(&loc.user_dir)
             .unwrap()
             .map(|e| e.unwrap().file_name())
@@ -365,23 +611,18 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn credentials_are_owner_only() {
+    fn credentials_are_owner_only_in_both_scopes() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let loc = locations(dir.path());
-        loc.write_activation(
-            "cert",
-            &ActivationCredentials {
-                activation_id: "a".into(),
-                client_secret: "s".into(),
-            },
-        )
-        .unwrap();
-        let mode = std::fs::metadata(loc.credentials_file())
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        for scope in [Scope::User, Scope::System] {
+            loc.write_activation(scope, "cert", &creds("a")).unwrap();
+            let mode = std::fs::metadata(loc.credentials_file(scope).unwrap())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 
     #[test]

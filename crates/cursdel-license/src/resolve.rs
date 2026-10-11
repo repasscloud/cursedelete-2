@@ -63,9 +63,16 @@ impl Resolution {
     }
 }
 
-/// The locally stored Business activation, if any.
-pub struct ActivationInput<'a> {
-    pub certificate: Option<&'a str>,
+/// Local state, besides the licence files themselves, that affects
+/// resolution.
+pub struct LocalState<'a> {
+    /// Every stored Business activation certificate (user and system
+    /// scope). A Business licence is active if any one of them is valid
+    /// for it on this device.
+    pub activation_certificates: &'a [&'a str],
+    /// Licence ids this installation knows to be revoked: reported by the
+    /// server, or listed by an administrator.
+    pub revoked_license_ids: &'a [String],
     /// Computed only if a Business licence actually needs it.
     pub device_id: &'a dyn Fn() -> String,
 }
@@ -73,7 +80,7 @@ pub struct ActivationInput<'a> {
 pub fn resolve(
     policy: &LicensePolicy,
     candidates: Vec<Candidate>,
-    activation: &ActivationInput<'_>,
+    local: &LocalState<'_>,
     now: OffsetDateTime,
 ) -> Resolution {
     let device_id = OnceCell::new();
@@ -86,15 +93,25 @@ pub fn resolve(
             .map_err(Rejection::Malformed)
             .and_then(|text| policy.verify_license(&text, now))
             .and_then(|license| {
+                if local
+                    .revoked_license_ids
+                    .contains(&license.claims.license_id)
+                {
+                    return Err(Rejection::Revoked);
+                }
                 if !license.claims.edition.requires_activation() {
                     return Ok((license, None));
                 }
-                let cert = activation
-                    .certificate
-                    .ok_or(Rejection::ActivationRequired)?;
-                let device = device_id.get_or_init(|| (activation.device_id)());
-                let claims = policy.verify_activation(cert, &license.claims, device, now)?;
-                Ok((license, Some(claims)))
+                let mut first_error = Rejection::ActivationRequired;
+                for (i, cert) in local.activation_certificates.iter().enumerate() {
+                    let device = device_id.get_or_init(|| (local.device_id)());
+                    match policy.verify_activation(cert, &license.claims, device, now) {
+                        Ok(claims) => return Ok((license, Some(claims))),
+                        Err(e) if i == 0 => first_error = e,
+                        Err(_) => {}
+                    }
+                }
+                Err(first_error)
             });
         match outcome {
             Ok((license, activation)) => valid.push(ActiveLicense {
@@ -160,11 +177,20 @@ mod tests {
         }
     }
 
-    fn no_activation() -> ActivationInput<'static> {
-        ActivationInput {
-            certificate: None,
+    fn no_activation() -> LocalState<'static> {
+        LocalState {
+            activation_certificates: &[],
+            revoked_license_ids: &[],
             device_id: &|| panic!("device id must not be needed"),
         }
+    }
+
+    fn business_cert(device: &str) -> String {
+        seal(
+            EnvelopeKind::Activation,
+            &activation_claims("lic_test_business", "app", 2, device),
+            &[&signer()],
+        )
     }
 
     #[test]
@@ -253,21 +279,54 @@ mod tests {
 
     #[test]
     fn activated_business_resolves_to_business() {
-        let cert = seal(
-            EnvelopeKind::Activation,
-            &activation_claims("lic_test_business", "app", 2, "DEV1"),
-            &[&signer()],
-        );
+        let cert = business_cert("DEV1");
         let r = resolve(
             &policy(),
             vec![candidate("b", Edition::Business)],
-            &ActivationInput {
-                certificate: Some(&cert),
+            &LocalState {
+                activation_certificates: &[&cert],
+                revoked_license_ids: &[],
                 device_id: &|| "DEV1".to_string(),
             },
             NOW,
         );
         assert_eq!(r.edition(), Edition::Business);
         assert!(r.active.unwrap().activation.is_some());
+    }
+
+    #[test]
+    fn any_matching_certificate_activates_business() {
+        let other = business_cert("SOMEONE-ELSE");
+        let mine = business_cert("DEV1");
+        let r = resolve(
+            &policy(),
+            vec![candidate("b", Edition::Business)],
+            &LocalState {
+                activation_certificates: &[&other, &mine],
+                revoked_license_ids: &[],
+                device_id: &|| "DEV1".to_string(),
+            },
+            NOW,
+        );
+        assert_eq!(r.edition(), Edition::Business);
+    }
+
+    #[test]
+    fn locally_known_revocation_rejects_an_otherwise_valid_licence() {
+        let r = resolve(
+            &policy(),
+            vec![
+                candidate("e", Edition::Enterprise),
+                candidate("c", Edition::Community),
+            ],
+            &LocalState {
+                revoked_license_ids: &["lic_test_enterprise".to_string()],
+                ..no_activation()
+            },
+            NOW,
+        );
+        assert_eq!(r.edition(), Edition::Community);
+        assert!(r.is_registered());
+        assert_eq!(r.rejected[0].reason, Rejection::Revoked);
     }
 }

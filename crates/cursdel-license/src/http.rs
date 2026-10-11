@@ -1,6 +1,6 @@
-//! HTTPS implementation of [`LicenseService`] against the **provisional**
-//! contract in `docs/LICENSING-SERVER-CONTRACT.md`. When the replacement
-//! server's real API is settled, only this module should need to change.
+//! HTTPS implementation of [`LicenseService`] against the API in
+//! `docs/LICENSING-SERVER-BRIEF.md` §5. If that API changes, only this
+//! module should need to change.
 
 use std::time::Duration;
 

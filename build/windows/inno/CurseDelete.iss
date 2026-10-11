@@ -43,18 +43,21 @@ Source: "__PAYLOAD_DIR__\CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "__PAYLOAD_DIR__\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Run]
-; Optional deployment enrollment after installation.
+; Optional machine-wide licensing after installation:
+;   /LICENSEFILE="C:\Deploy\cursedelete.license"  install a signed licence file (offline)
+;   /ACTIVATIONKEY="XXXX-XXXX"                     activate online (needs the build's licensing server URL)
+; A licence problem never fails the install; CurseDelete then runs as Community.
 Filename: "{app}\cursdel.exe"; \
-    Parameters: "license enroll --deploymentkey=""{code:GetDeploymentKey}"""; \
+    Parameters: "license install --system ""{code:GetLicenseFile}"""; \
     WorkingDir: "{app}"; \
     Flags: runhidden waituntilterminated; \
-    Check: HasDeploymentKey
+    Check: HasLicenseFile
 
-; Grant BUILTIN\Users Modify to JSON files created by the enrollment step.
-Filename: "{cmd}"; \
-    Parameters: "/d /s /c if exist ""{app}\*.json"" icacls ""{app}\*.json"" /grant *S-1-5-32-545:(M) /C"; \
+Filename: "{app}\cursdel.exe"; \
+    Parameters: "license activate --system ""{code:GetActivationKey}"""; \
+    WorkingDir: "{app}"; \
     Flags: runhidden waituntilterminated; \
-    Check: HasJsonFiles
+    Check: HasActivationKey
 
 [Code]
 const
@@ -93,23 +96,26 @@ begin
     Result := DefaultInstallPath;
 end;
 
-function GetDeploymentKey(Param: String): String;
+function GetLicenseFile(Param: String): String;
 begin
-  Result := GetNamedParameter('deploymentkey');
+  Result := GetNamedParameter('licensefile');
+  if Result <> '' then
+    Result := ExpandFileName(Result);
 end;
 
-function HasDeploymentKey: Boolean;
+function HasLicenseFile: Boolean;
 begin
-  Result := GetDeploymentKey('') <> '';
+  Result := GetLicenseFile('') <> '';
 end;
 
-function HasJsonFiles: Boolean;
-var
-  FindRec: TFindRec;
+function GetActivationKey(Param: String): String;
 begin
-  Result := FindFirst(ExpandConstant('{app}\*.json'), FindRec);
-  if Result then
-    FindClose(FindRec);
+  Result := GetNamedParameter('activationkey');
+end;
+
+function HasActivationKey: Boolean;
+begin
+  Result := GetActivationKey('') <> '';
 end;
 
 function NormalizePathEntry(const Value: String): String;

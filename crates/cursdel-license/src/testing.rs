@@ -158,3 +158,222 @@ pub fn activation_claims(
         "expiresAt": null,
     })
 }
+
+/// Deterministic, published test vectors for licensing-server
+/// implementers (embedded in `docs/LICENSING-SERVER-BRIEF.md` and checked
+/// against this crate by the `vectors` tests below). All three algorithms
+/// sign deterministically here (Ed25519 per RFC 8032, ECDSA via RFC 6979,
+/// ML-DSA-65 in its deterministic variant), so an implementation using
+/// the same seeds and deterministic signing reproduces every byte;
+/// randomised ECDSA/ML-DSA signers produce different, equally valid
+/// signatures.
+pub fn test_vectors() -> Value {
+    let ed = TestSigner::new("vector-ed25519", SignatureAlgorithm::Ed25519, 1);
+    let p256 = TestSigner::new("vector-p256", SignatureAlgorithm::EcdsaP256Sha256, 2);
+    let pq = TestSigner::new("vector-mldsa65", SignatureAlgorithm::MlDsa65, 3);
+    let key = |s: &TestSigner, seed: u8| {
+        json!({
+            "keyId": s.key_id,
+            "algorithm": s.algorithm.id(),
+            "testOnlyPrivateSeedHex": hex::encode([seed; 32]),
+            "publicKey": URL_SAFE_NO_PAD.encode(s.public_key_bytes()),
+        })
+    };
+    let envelope = |kind: EnvelopeKind, claims: &Value, signers: &[&TestSigner]| -> Value {
+        serde_json::from_str(&seal(kind, claims, signers)).expect("sealed envelope is JSON")
+    };
+    let device_id = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
+
+    let enterprise = json!({
+        "schemaVersion": 1,
+        "licenseId": "lic_vector_enterprise",
+        "customerId": "cus_vector_001",
+        "productId": "cursedelete",
+        "majorVersion": 2,
+        "edition": "enterprise",
+        "organisation": "Example Organisation Pty Ltd",
+        "issuedAt": "2026-10-11T00:00:00Z",
+        "perpetual": true,
+        "expiresAt": null,
+    });
+    let business = json!({
+        "schemaVersion": 1,
+        "licenseId": "lic_vector_business",
+        "customerId": "cus_vector_002",
+        "productId": "cursedelete",
+        "majorVersion": 2,
+        "edition": "business",
+        "organisation": "Example Business Pty Ltd",
+        "issuedAt": "2026-10-11T00:00:00Z",
+        "perpetual": false,
+        "expiresAt": "2027-10-11T00:00:00Z",
+        "maxActivations": 3,
+    });
+    let activation = json!({
+        "schemaVersion": 1,
+        "activationId": "act_vector_001",
+        "licenseId": "lic_vector_business",
+        "productId": "cursedelete",
+        "majorVersion": 2,
+        "deviceId": device_id,
+        "issuedAt": "2026-10-11T00:05:00Z",
+        "expiresAt": null,
+    });
+    let community = json!({
+        "schemaVersion": 1,
+        "licenseId": "lic_vector_community",
+        "customerId": "cus_vector_003",
+        "productId": "cursedelete",
+        "majorVersion": 2,
+        "edition": "community",
+        "customerName": "Jane Citizen",
+        "issuedAt": "2026-10-11T00:00:00Z",
+        "perpetual": true,
+        "expiresAt": null,
+    });
+
+    // Valid signature, but over different claims than the payload now holds.
+    let mut tampered = envelope(EnvelopeKind::License, &enterprise, &[&ed]);
+    tampered["payload"] = json!(URL_SAFE_NO_PAD.encode(
+        enterprise
+            .to_string()
+            .replace("lic_vector_enterprise", "lic_vector_forged")
+    ));
+
+    json!({
+        "validateAs": {
+            "productId": "cursedelete",
+            "majorVersion": 2,
+            "now": "2026-10-12T00:00:00Z",
+            "deviceId": device_id,
+        },
+        "keys": [key(&ed, 1), key(&p256, 2), key(&pq, 3)],
+        "vectors": [
+            {
+                "name": "enterprise-perpetual-ed25519",
+                "claims": enterprise,
+                "envelope": envelope(EnvelopeKind::License, &enterprise, &[&ed]),
+                "expect": "valid",
+            },
+            {
+                "name": "business-subscription-ecdsa-p256",
+                "claims": business,
+                "envelope": envelope(EnvelopeKind::License, &business, &[&p256]),
+                "expect": "valid",
+            },
+            {
+                "name": "business-activation-certificate-ml-dsa-65",
+                "activates": "business-subscription-ecdsa-p256",
+                "claims": activation,
+                "envelope": envelope(EnvelopeKind::Activation, &activation, &[&pq]),
+                "expect": "valid",
+            },
+            {
+                "name": "community-dual-signed-ed25519-ml-dsa-65",
+                "claims": community,
+                "envelope": envelope(EnvelopeKind::License, &community, &[&ed, &pq]),
+                "expect": "valid",
+            },
+            {
+                "name": "tampered-payload-must-be-rejected",
+                "envelope": tampered,
+                "expect": "invalidSignature",
+            },
+        ],
+    })
+}
+
+#[cfg(test)]
+mod vectors {
+    use super::*;
+    use crate::keys::TrustedKeySet;
+    use crate::validate::{LicensePolicy, ProductIdentity, Rejection};
+
+    const BRIEF: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/LICENSING-SERVER-BRIEF.md"
+    );
+    const BEGIN: &str = "<!-- BEGIN TEST VECTORS -->\n```json\n";
+    const END: &str = "\n```\n<!-- END TEST VECTORS -->";
+
+    fn embedded(doc: &str) -> (usize, usize) {
+        let start = doc
+            .find(BEGIN)
+            .expect("brief has a BEGIN TEST VECTORS marker")
+            + BEGIN.len();
+        let end = start + doc[start..].find(END).expect("brief has an END marker");
+        (start, end)
+    }
+
+    /// Run with `UPDATE_LICENSING_VECTORS=1` to rewrite the block in the brief.
+    #[test]
+    fn brief_contains_the_current_vectors() {
+        let expected = serde_json::to_string_pretty(&test_vectors()).unwrap();
+        let doc = std::fs::read_to_string(BRIEF).unwrap();
+        let (start, end) = embedded(&doc);
+        if std::env::var_os("UPDATE_LICENSING_VECTORS").is_some() {
+            let updated = format!("{}{}{}", &doc[..start], expected, &doc[end..]);
+            std::fs::write(BRIEF, updated).unwrap();
+            return;
+        }
+        assert!(
+            doc[start..end] == expected,
+            "test vectors in docs/LICENSING-SERVER-BRIEF.md are stale; \
+             rerun with UPDATE_LICENSING_VECTORS=1"
+        );
+    }
+
+    #[test]
+    fn every_vector_validates_as_documented() {
+        let v = test_vectors();
+        let keys = v["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| {
+                TrustedKey::from_base64url(
+                    k["keyId"].as_str().unwrap(),
+                    SignatureAlgorithm::from_id(k["algorithm"].as_str().unwrap()).unwrap(),
+                    k["publicKey"].as_str().unwrap(),
+                )
+                .unwrap()
+            })
+            .collect();
+        let policy = LicensePolicy {
+            product: ProductIdentity {
+                product_id: "cursedelete".into(),
+                major_version: 2,
+            },
+            trusted_keys: TrustedKeySet::new(keys).unwrap(),
+            allowed_algorithms: SignatureAlgorithm::ALL.to_vec(),
+            business_offline_limit: None,
+        };
+        let now = time::macros::datetime!(2026-10-12 0:00 UTC);
+        let device = v["validateAs"]["deviceId"].as_str().unwrap();
+        let vectors = v["vectors"].as_array().unwrap();
+        let text = |name: &str| {
+            vectors.iter().find(|x| x["name"] == name).unwrap()["envelope"].to_string()
+        };
+
+        for vector in vectors {
+            let name = vector["name"].as_str().unwrap();
+            let result = match vector["activates"].as_str() {
+                Some(licence) => {
+                    let licence = policy.verify_license(&text(licence), now).unwrap();
+                    policy
+                        .verify_activation(&text(name), &licence.claims, device, now)
+                        .map(|_| ())
+                }
+                None => policy.verify_license(&text(name), now).map(|_| ()),
+            };
+            match vector["expect"].as_str().unwrap() {
+                "valid" => assert!(result.is_ok(), "{name}: {result:?}"),
+                "invalidSignature" => assert!(
+                    matches!(result, Err(Rejection::InvalidSignature(_))),
+                    "{name}: {result:?}"
+                ),
+                other => panic!("unknown expectation {other}"),
+            }
+        }
+    }
+}

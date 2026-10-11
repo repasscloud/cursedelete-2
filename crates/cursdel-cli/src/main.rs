@@ -118,7 +118,7 @@ fn main() {
 
 fn run(cli: Cli) -> ExitCode {
     match cli.command {
-        Some(Command::License { action }) => license_cmd::run(action),
+        Some(Command::License { action }) => license_cmd::run(action, cli.license_file),
         None => run_delete(cli),
     }
 }
@@ -181,7 +181,9 @@ fn run_delete(cli: Cli) -> ExitCode {
     };
 
     let feature = cursdel_policy::Feature::CloseRemoteLocks;
-    if cli.close_remote_locks && !feature.is_enabled(license_cmd::current_edition()) {
+    if cli.close_remote_locks
+        && !feature.is_enabled(license_cmd::current_edition(cli.license_file.clone()))
+    {
         let editions: Vec<&str> = feature
             .editions()
             .into_iter()

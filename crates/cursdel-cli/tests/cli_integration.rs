@@ -628,6 +628,27 @@ fn license_install_rejects_a_corrupt_file() {
 }
 
 #[test]
+fn license_file_flag_is_global_and_reported_by_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ci.license");
+    fs::write(&path, "{ not a licence").unwrap();
+    cursdel_isolated(dir.path())
+        .args(["license", "status", "--license-file"])
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ci.license"))
+        .stdout(predicate::str::contains("not a valid licence file"));
+    // Also accepted before the subcommand, and on a deletion run.
+    cursdel_isolated(dir.path())
+        .arg("--license-file")
+        .arg(&path)
+        .args(["license", "status"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn license_install_reports_usage_error_for_missing_file() {
     let dir = tempfile::tempdir().unwrap();
     cursdel_isolated(dir.path())

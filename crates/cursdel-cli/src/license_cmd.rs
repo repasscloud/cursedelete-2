@@ -5,26 +5,29 @@
 //! state validate everything the server returns before writing anything,
 //! and a failed network call never removes or replaces an existing
 //! licence or activation. Client secrets are never printed.
+//!
+//! Write commands act on one [`Scope`]: the current user's store by
+//! default, or the machine-wide store with `--system` (installers,
+//! site-wide deployment). Reading always considers both.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 use cursdel_core::exit_code::ExitCode;
-use cursdel_license::resolve::ActivationInput;
 use cursdel_license::service::{
     ActivateRequest, ActivationRef, Product, RenewRequest, CODE_ACTIVATION_INACTIVE,
 };
 use cursdel_license::store::{generate_client_secret, ActivationCredentials};
 use cursdel_license::{
-    device, Edition, LicenseLocations, LicensePolicy, LicenseService, Resolution, ServiceError,
-    Term, VerifiedLicense,
+    device, Edition, LicenseLocations, LicensePolicy, LicenseService, LocalState, Rejection,
+    Resolution, Scope, ServiceError, Term, VerifiedLicense,
 };
 use cursdel_policy::Feature;
 
-use crate::args::LicenseAction;
+use crate::args::{LicenseAction, ScopeArg};
 
 /// Everything a licence command depends on, injected so the commands can
 /// be tested without real storage locations, devices, or a server.
@@ -36,22 +39,31 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn production() -> Self {
+    /// `license_file` is the global `--license-file` flag, which takes
+    /// precedence over `CURSDEL_LICENSE_FILE`.
+    pub fn production(license_file: Option<PathBuf>) -> Self {
+        let mut locations = cursdel_policy::locations();
+        if license_file.is_some() {
+            locations.override_file = license_file;
+        }
         Self {
             policy: cursdel_policy::license_policy(),
-            locations: cursdel_policy::locations(),
+            locations,
             device_id: Box::new(|| device::current(cursdel_policy::DEVICE_NAMESPACE).device_id),
             now: OffsetDateTime::now_utc(),
         }
     }
 
     pub fn resolve(&self) -> Resolution {
-        let certificate = self.locations.read_activation_certificate().ok().flatten();
+        let stored = self.locations.activation_certificates();
+        let certificates: Vec<&str> = stored.iter().map(|a| a.certificate.as_str()).collect();
+        let revoked = self.locations.revoked_license_ids();
         cursdel_license::resolve(
             &self.policy,
             self.locations.candidates(),
-            &ActivationInput {
-                certificate: certificate.as_deref(),
+            &LocalState {
+                activation_certificates: &certificates,
+                revoked_license_ids: &revoked,
                 device_id: &*self.device_id,
             },
             self.now,
@@ -68,12 +80,20 @@ impl Context {
 
 /// The edition currently in effect on this machine. Never fails: any
 /// problem resolves to Community.
-pub fn current_edition() -> Edition {
-    Context::production().resolve().edition()
+pub fn current_edition(license_file: Option<PathBuf>) -> Edition {
+    Context::production(license_file).resolve().edition()
 }
 
-pub fn run(action: LicenseAction) -> ExitCode {
-    let ctx = Context::production();
+fn scope_of(arg: ScopeArg) -> Scope {
+    if arg.system {
+        Scope::System
+    } else {
+        Scope::User
+    }
+}
+
+pub fn run(action: LicenseAction, license_file: Option<PathBuf>) -> ExitCode {
+    let ctx = Context::production(license_file);
     let online = |f: &dyn Fn(&dyn LicenseService) -> ExitCode| match cursdel_policy::service() {
         Ok(service) => f(service.as_ref()),
         Err(e) => {
@@ -83,12 +103,13 @@ pub fn run(action: LicenseAction) -> ExitCode {
     };
     match action {
         LicenseAction::Status { json } => status(&ctx, json),
-        LicenseAction::Install { license_file } => install(&ctx, &license_file),
-        LicenseAction::Activate { activation_key } => {
-            online(&|s| activate(&ctx, s, &activation_key))
-        }
-        LicenseAction::Deactivate => online(&|s| deactivate(&ctx, s)),
-        LicenseAction::Renew => online(&|s| renew(&ctx, s)),
+        LicenseAction::Install { path, scope } => install(&ctx, &path, scope_of(scope)),
+        LicenseAction::Activate {
+            activation_key,
+            scope,
+        } => online(&|s| activate(&ctx, s, &activation_key, scope_of(scope))),
+        LicenseAction::Deactivate { scope } => online(&|s| deactivate(&ctx, s, scope_of(scope))),
+        LicenseAction::Renew { scope } => online(&|s| renew(&ctx, s, scope_of(scope))),
     }
 }
 
@@ -103,6 +124,14 @@ fn describe_term(term: Term) -> String {
             format!("subscription, expires {}", timestamp(expires_at))
         }
     }
+}
+
+fn write_failed(what: &str, scope: Scope, e: &std::io::Error) -> ExitCode {
+    eprintln!("Error: could not save {what}: {e}");
+    if scope == Scope::System {
+        eprintln!("--system needs administrator (Windows) or root (macOS/Linux) rights.");
+    }
+    ExitCode::UnexpectedFatal
 }
 
 fn status(ctx: &Context, json: bool) -> ExitCode {
@@ -240,7 +269,15 @@ fn status_json(ctx: &Context, resolution: &Resolution) -> Value {
     })
 }
 
-fn install(ctx: &Context, path: &Path) -> ExitCode {
+fn print_activation_hint_if_needed(ctx: &Context, edition: Edition) {
+    if edition.requires_activation() && ctx.resolve().edition() != Edition::Business {
+        println!();
+        println!("Business licences must also be activated on each device:");
+        println!("  cursdel license activate <key>");
+    }
+}
+
+fn install(ctx: &Context, path: &Path, scope: Scope) -> ExitCode {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
@@ -257,21 +294,24 @@ fn install(ctx: &Context, path: &Path) -> ExitCode {
         }
     };
 
-    let previous = std::fs::read_to_string(ctx.locations.user_license_file())
+    let previous = ctx
+        .locations
+        .license_file(scope)
         .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|t| ctx.policy.verify_license(&t, ctx.now).ok());
-    if let Err(e) = ctx.locations.write_user_license(&text) {
-        eprintln!("Error: could not save licence: {e}");
-        return ExitCode::UnexpectedFatal;
+    if let Err(e) = ctx.locations.write_license(scope, &text) {
+        return write_failed("the licence", scope, &e);
     }
 
     let c = &verified.claims;
     println!(
-        "Installed {} licence {} for CurseDelete v{} ({}).",
+        "Installed {} licence {} for CurseDelete v{} ({}) in the {} licence store.",
         c.edition,
         c.license_id,
         c.major_version,
-        describe_term(c.term)
+        describe_term(c.term),
+        scope.name()
     );
     if let Some(prev) = previous.filter(|p| p.claims.license_id != c.license_id) {
         println!(
@@ -279,11 +319,12 @@ fn install(ctx: &Context, path: &Path) -> ExitCode {
             prev.claims.edition, prev.claims.license_id
         );
     }
-    if c.edition.requires_activation() && ctx.resolve().edition() != Edition::Business {
+    if ctx.locations.revoked_license_ids().contains(&c.license_id) {
         println!();
-        println!("Business licences must also be activated on each device:");
-        println!("  cursdel license activate <key>");
+        println!("Note: this licence is recorded as revoked, so it will not be used.");
+        println!("Run 'cursdel license renew' to re-check with the licensing server.");
     }
+    print_activation_hint_if_needed(ctx, c.edition);
     ExitCode::Success
 }
 
@@ -304,7 +345,12 @@ fn report_service_error(action: &str, e: &ServiceError) {
     }
 }
 
-fn activate(ctx: &Context, service: &dyn LicenseService, activation_key: &str) -> ExitCode {
+fn activate(
+    ctx: &Context,
+    service: &dyn LicenseService,
+    activation_key: &str,
+    scope: Scope,
+) -> ExitCode {
     let device_id = (ctx.device_id)();
     let client_secret = generate_client_secret();
     let grant = match service.activate(&ActivateRequest {
@@ -346,7 +392,7 @@ fn activate(ctx: &Context, service: &dyn LicenseService, activation_key: &str) -
         };
         let replaced = ctx
             .locations
-            .read_credentials()
+            .read_credentials(scope)
             .ok()
             .flatten()
             .filter(|old| old.activation_id != claims.activation_id);
@@ -354,13 +400,13 @@ fn activate(ctx: &Context, service: &dyn LicenseService, activation_key: &str) -
             activation_id: claims.activation_id.clone(),
             client_secret,
         };
-        if let Err(e) = ctx.locations.write_activation(cert, &credentials) {
-            eprintln!("Error: could not save the activation: {e}");
+        if let Err(e) = ctx.locations.write_activation(scope, cert, &credentials) {
+            let code = write_failed("the activation", scope, &e);
             eprintln!(
                 "The seat was allocated on the server; release activation {} from the customer portal if needed.",
                 claims.activation_id
             );
-            return ExitCode::UnexpectedFatal;
+            return code;
         }
         if let Some(old) = replaced {
             println!(
@@ -372,16 +418,17 @@ fn activate(ctx: &Context, service: &dyn LicenseService, activation_key: &str) -
         activation_id = Some(claims.activation_id);
     }
 
-    if let Err(e) = ctx.locations.write_user_license(&grant.license) {
-        eprintln!("Error: could not save licence: {e}");
-        return ExitCode::UnexpectedFatal;
+    if let Err(e) = ctx.locations.write_license(scope, &grant.license) {
+        return write_failed("the licence", scope, &e);
     }
+    let _ = ctx.locations.clear_revocation(scope, &c.license_id);
     println!(
-        "Activated {} licence {} for CurseDelete v{} ({}).",
+        "Activated {} licence {} for CurseDelete v{} ({}) in the {} licence store.",
         c.edition,
         c.license_id,
         c.major_version,
-        describe_term(c.term)
+        describe_term(c.term),
+        scope.name()
     );
     if let Some(id) = activation_id {
         println!("This device is activation {id}.");
@@ -389,11 +436,30 @@ fn activate(ctx: &Context, service: &dyn LicenseService, activation_key: &str) -
     ExitCode::Success
 }
 
-fn deactivate(ctx: &Context, service: &dyn LicenseService) -> ExitCode {
-    let credentials = match ctx.locations.read_credentials() {
+/// Point at the other scope when the requested one has nothing to act on.
+fn other_scope_hint(scope: Scope, has_it: impl Fn(Scope) -> bool) {
+    match scope {
+        Scope::User if has_it(Scope::System) => println!(
+            "This machine has a machine-wide one: run the command with --system as administrator/root."
+        ),
+        Scope::System if has_it(Scope::User) => {
+            println!("The current user has one: run the command without --system.")
+        }
+        _ => {}
+    }
+}
+
+fn deactivate(ctx: &Context, service: &dyn LicenseService, scope: Scope) -> ExitCode {
+    let credentials = match ctx.locations.read_credentials(scope) {
         Ok(Some(c)) => c,
         Ok(None) => {
-            println!("No Business activation is stored on this device.");
+            println!(
+                "No Business activation is stored in the {} licence store.",
+                scope.name()
+            );
+            other_scope_hint(scope, |s| {
+                ctx.locations.read_credentials(s).ok().flatten().is_some()
+            });
             return ExitCode::Success;
         }
         Err(e) => {
@@ -410,6 +476,7 @@ fn deactivate(ctx: &Context, service: &dyn LicenseService) -> ExitCode {
     let already_released = match service.deactivate(ctx.product(), &activation) {
         Ok(()) => false,
         Err(ServiceError::Rejected { code, .. }) if code == CODE_ACTIVATION_INACTIVE => true,
+        Err(ServiceError::Revoked(_)) => true,
         Err(e) => {
             report_service_error("deactivation", &e);
             eprintln!(
@@ -419,7 +486,7 @@ fn deactivate(ctx: &Context, service: &dyn LicenseService) -> ExitCode {
             return ExitCode::LicenseRequired;
         }
     };
-    if let Err(e) = ctx.locations.remove_activation() {
+    if let Err(e) = ctx.locations.remove_activation(scope) {
         eprintln!(
             "Warning: the seat was released on the server, but the local activation could not be removed: {e}"
         );
@@ -427,7 +494,7 @@ fn deactivate(ctx: &Context, service: &dyn LicenseService) -> ExitCode {
     }
     if already_released {
         println!(
-            "Activation {} had already been released on the server; removed it from this device.",
+            "Activation {} was no longer active on the server; removed it from this device.",
             credentials.activation_id
         );
     } else {
@@ -440,31 +507,39 @@ fn deactivate(ctx: &Context, service: &dyn LicenseService) -> ExitCode {
     ExitCode::Success
 }
 
-/// The licence to renew: the one in effect, or else any installed licence
-/// for this product and major version whose signature verifies -- an
+/// The licence in `scope` to renew: a currently valid one if present,
+/// else any whose signature, product and major version verify -- an
 /// expired subscription is exactly what `renew` exists for.
-fn renewable(ctx: &Context, resolution: Resolution) -> Option<VerifiedLicense> {
-    resolution.active.map(|a| a.license).or_else(|| {
-        ctx.locations
-            .candidates()
-            .into_iter()
-            .filter_map(|c| c.contents.ok())
-            .find_map(|text| ctx.policy.verify_license_identity(&text).ok())
-    })
+fn renewable(ctx: &Context, scope: Scope) -> Option<VerifiedLicense> {
+    let texts: Vec<String> = ctx
+        .locations
+        .candidates_in(scope)
+        .into_iter()
+        .filter_map(|c| c.contents.ok())
+        .collect();
+    texts
+        .iter()
+        .find_map(|t| ctx.policy.verify_license(t, ctx.now).ok())
+        .or_else(|| {
+            texts
+                .iter()
+                .find_map(|t| ctx.policy.verify_license_identity(t).ok())
+        })
 }
 
-fn renew(ctx: &Context, service: &dyn LicenseService) -> ExitCode {
-    let Some(current) = renewable(ctx, ctx.resolve()) else {
+fn renew(ctx: &Context, service: &dyn LicenseService, scope: Scope) -> ExitCode {
+    let Some(current) = renewable(ctx, scope) else {
         eprintln!(
-            "Error: no CurseDelete v{} licence is installed to renew.",
-            ctx.policy.product.major_version
+            "Error: no CurseDelete v{} licence is installed in the {} licence store to renew.",
+            ctx.policy.product.major_version,
+            scope.name()
         );
-        eprintln!("Install one with 'cursdel license install <file>' or 'cursdel license activate <key>'.");
+        other_scope_hint(scope, |s| renewable(ctx, s).is_some());
         return ExitCode::LicenseRequired;
     };
     let current = current.claims;
     let credentials = if current.edition.requires_activation() {
-        ctx.locations.read_credentials().ok().flatten()
+        ctx.locations.read_credentials(scope).ok().flatten()
     } else {
         None
     };
@@ -488,6 +563,28 @@ fn renew(ctx: &Context, service: &dyn LicenseService) -> ExitCode {
         activation,
     }) {
         Ok(g) => g,
+        Err(ServiceError::Revoked(message)) => {
+            // Revocation information received from the server: honour it.
+            if let Err(e) = ctx.locations.record_revocation(scope, &current.license_id) {
+                return write_failed("the revocation", scope, &e);
+            }
+            eprintln!("Licence {} has been revoked: {message}", current.license_id);
+            eprintln!("It will no longer be used; CurseDelete falls back to any other valid licence, or Community.");
+            return ExitCode::LicenseRequired;
+        }
+        Err(ServiceError::Rejected { code, message }) if code == CODE_ACTIVATION_INACTIVE => {
+            // A portal release (or support action) reaching this device.
+            if let Err(e) = ctx.locations.remove_activation(scope) {
+                return write_failed("the activation removal", scope, &e);
+            }
+            eprintln!(
+                "This device's Business activation is no longer active on the server: {message}"
+            );
+            eprintln!(
+                "It was removed locally. Run 'cursdel license activate <key>' to activate again."
+            );
+            return ExitCode::LicenseRequired;
+        }
         Err(e) => {
             report_service_error("renewal", &e);
             return keep();
@@ -495,6 +592,14 @@ fn renew(ctx: &Context, service: &dyn LicenseService) -> ExitCode {
     };
     let renewed = match ctx.policy.verify_license(&grant.license, ctx.now) {
         Ok(l) => l.claims,
+        Err(Rejection::Expired(at)) => {
+            eprintln!(
+                "Error: the licensing server's current licence for this subscription also expired ({}).",
+                timestamp(at)
+            );
+            eprintln!("Renew the subscription, then run 'cursdel license renew' again.");
+            return keep();
+        }
         Err(r) => {
             eprintln!("Error: the licensing server returned a licence this build cannot use: {r}");
             return keep();
@@ -518,24 +623,21 @@ fn renew(ctx: &Context, service: &dyn LicenseService) -> ExitCode {
             activation_id: claims.activation_id,
             client_secret: creds.client_secret.clone(),
         };
-        if let Err(e) = ctx.locations.write_activation(cert, &creds) {
-            eprintln!("Error: could not save the renewed activation: {e}");
-            return ExitCode::UnexpectedFatal;
+        if let Err(e) = ctx.locations.write_activation(scope, cert, &creds) {
+            return write_failed("the renewed activation", scope, &e);
         }
     }
-    if let Err(e) = ctx.locations.write_user_license(&grant.license) {
-        eprintln!("Error: could not save the renewed licence: {e}");
-        return ExitCode::UnexpectedFatal;
+    if let Err(e) = ctx.locations.write_license(scope, &grant.license) {
+        return write_failed("the renewed licence", scope, &e);
     }
+    let _ = ctx.locations.clear_revocation(scope, &renewed.license_id);
     println!(
         "Renewed {} licence {} ({}).",
         renewed.edition,
         renewed.license_id,
         describe_term(renewed.term)
     );
-    if renewed.edition.requires_activation() && ctx.resolve().edition() != Edition::Business {
-        println!("This device still needs activation: cursdel license activate <key>");
-    }
+    print_activation_hint_if_needed(ctx, renewed.edition);
     ExitCode::Success
 }
 
@@ -553,6 +655,8 @@ mod tests {
     use super::*;
 
     const DEVICE: &str = "DEVICE-1";
+    const USER: Scope = Scope::User;
+    const SYSTEM: Scope = Scope::System;
 
     fn signer() -> TestSigner {
         TestSigner::new("test-alpha", SignatureAlgorithm::Ed25519, 1)
@@ -572,7 +676,7 @@ mod tests {
             locations: LicenseLocations {
                 override_file: None,
                 user_dir: dir.join("user"),
-                admin_dir: Some(dir.join("admin")),
+                system_dir: Some(dir.join("system")),
             },
             device_id: Box::new(|| DEVICE.to_string()),
             now: datetime!(2026-10-11 0:00 UTC),
@@ -648,10 +752,14 @@ mod tests {
         }
     }
 
-    fn file(dir: &Path, name: &str, contents: &str) -> std::path::PathBuf {
+    fn file(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, contents).unwrap();
         path
+    }
+
+    fn user_licence_text(ctx: &Context) -> String {
+        std::fs::read_to_string(ctx.locations.license_file(USER).unwrap()).unwrap()
     }
 
     #[test]
@@ -673,7 +781,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = context(dir.path());
         let path = file(dir.path(), "ent.license", &licence(Edition::Enterprise));
-        assert_eq!(install(&ctx, &path), ExitCode::Success);
+        assert_eq!(install(&ctx, &path, USER), ExitCode::Success);
         let r = ctx.resolve();
         assert_eq!(r.edition(), Edition::Enterprise);
         assert!(Feature::CloseRemoteLocks.is_enabled(r.edition()));
@@ -684,12 +792,34 @@ mod tests {
     }
 
     #[test]
+    fn system_scope_install_is_machine_wide() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path());
+        let path = file(dir.path(), "ent.license", &licence(Edition::Enterprise));
+        assert_eq!(install(&ctx, &path, SYSTEM), ExitCode::Success);
+        assert!(!ctx.locations.license_file(USER).unwrap().exists());
+        assert_eq!(ctx.resolve().edition(), Edition::Enterprise);
+    }
+
+    #[test]
+    fn override_file_is_used_without_installing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = context(dir.path());
+        ctx.locations.override_file = Some(file(
+            dir.path(),
+            "ci.license",
+            &licence(Edition::Enterprise),
+        ));
+        assert_eq!(ctx.resolve().edition(), Edition::Enterprise);
+    }
+
+    #[test]
     fn education_and_registered_community_install_offline() {
         for edition in [Edition::Education, Edition::Community] {
             let dir = tempfile::tempdir().unwrap();
             let ctx = context(dir.path());
             let path = file(dir.path(), "l.license", &licence(edition));
-            assert_eq!(install(&ctx, &path), ExitCode::Success);
+            assert_eq!(install(&ctx, &path, USER), ExitCode::Success);
             let r = ctx.resolve();
             assert_eq!(r.edition(), edition);
             assert!(r.is_registered());
@@ -698,12 +828,12 @@ mod tests {
     }
 
     #[test]
-    fn admin_directory_licence_is_discovered() {
+    fn hand_copied_system_licence_is_discovered() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = context(dir.path());
-        std::fs::create_dir_all(dir.path().join("admin")).unwrap();
+        std::fs::create_dir_all(dir.path().join("system")).unwrap();
         file(
-            &dir.path().join("admin"),
+            &dir.path().join("system"),
             "site.license",
             &licence(Edition::Enterprise),
         );
@@ -715,7 +845,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = context(dir.path());
         let good = file(dir.path(), "good.license", &licence(Edition::Enterprise));
-        assert_eq!(install(&ctx, &good), ExitCode::Success);
+        assert_eq!(install(&ctx, &good, USER), ExitCode::Success);
 
         let stranger = TestSigner::new("stranger", SignatureAlgorithm::Ed25519, 9);
         let untrusted = seal(
@@ -737,11 +867,15 @@ mod tests {
             ("expired", expired),
         ] {
             let path = file(dir.path(), name, &text);
-            assert_eq!(install(&ctx, &path), ExitCode::LicenseRequired, "{name}");
+            assert_eq!(
+                install(&ctx, &path, USER),
+                ExitCode::LicenseRequired,
+                "{name}"
+            );
             assert_eq!(ctx.resolve().edition(), Edition::Enterprise, "{name}");
         }
         assert_eq!(
-            install(&ctx, &dir.path().join("missing")),
+            install(&ctx, &dir.path().join("missing"), USER),
             ExitCode::CliUsageError
         );
     }
@@ -751,26 +885,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = context(dir.path());
         let path = file(dir.path(), "b.license", &licence(Edition::Business));
-        assert_eq!(install(&ctx, &path), ExitCode::Success);
+        assert_eq!(install(&ctx, &path, USER), ExitCode::Success);
         let r = ctx.resolve();
         assert_eq!(r.edition(), Edition::Community);
-        assert_eq!(
-            r.rejected[0].reason,
-            cursdel_license::Rejection::ActivationRequired
-        );
+        assert_eq!(r.rejected[0].reason, Rejection::ActivationRequired);
     }
 
     #[test]
     fn business_activation_stores_licence_certificate_and_secret() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = context(dir.path());
-        let svc = FakeService::granting(licence(Edition::Business), Some(certificate("act_1")));
-        assert_eq!(activate(&ctx, &svc, "KEY-1"), ExitCode::Success);
-        assert_eq!(svc.calls.borrow().as_slice(), ["activate:KEY-1"]);
-        assert_eq!(ctx.resolve().edition(), Edition::Business);
-        let creds = ctx.locations.read_credentials().unwrap().unwrap();
-        assert_eq!(creds.activation_id, "act_1");
-        assert!(!creds.client_secret.is_empty());
+        for scope in [USER, SYSTEM] {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = context(dir.path());
+            let svc = FakeService::granting(licence(Edition::Business), Some(certificate("act_1")));
+            assert_eq!(activate(&ctx, &svc, "KEY-1", scope), ExitCode::Success);
+            assert_eq!(svc.calls.borrow().as_slice(), ["activate:KEY-1"]);
+            assert_eq!(ctx.resolve().edition(), Edition::Business);
+            let creds = ctx.locations.read_credentials(scope).unwrap().unwrap();
+            assert_eq!(creds.activation_id, "act_1");
+            assert!(!creds.client_secret.is_empty());
+        }
     }
 
     #[test]
@@ -778,10 +911,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = context(dir.path());
         let svc = FakeService::granting(licence(Edition::Enterprise), None);
-        assert_eq!(activate(&ctx, &svc, "KEY"), ExitCode::Success);
+        assert_eq!(activate(&ctx, &svc, "KEY", USER), ExitCode::Success);
         assert_eq!(ctx.resolve().edition(), Edition::Enterprise);
-        assert_eq!(ctx.locations.read_credentials().unwrap(), None);
-        assert_eq!(ctx.locations.read_activation_certificate().unwrap(), None);
+        assert_eq!(ctx.locations.read_credentials(USER).unwrap(), None);
+        assert!(ctx.locations.activation_certificates().is_empty());
     }
 
     #[test]
@@ -811,16 +944,16 @@ mod tests {
         for svc in cases {
             let dir = tempfile::tempdir().unwrap();
             let ctx = context(dir.path());
-            assert_eq!(activate(&ctx, &svc, "KEY"), ExitCode::LicenseRequired);
-            assert!(!ctx.locations.user_license_file().exists());
-            assert_eq!(ctx.locations.read_credentials().unwrap(), None);
+            assert_eq!(activate(&ctx, &svc, "KEY", USER), ExitCode::LicenseRequired);
+            assert!(!ctx.locations.license_file(USER).unwrap().exists());
+            assert_eq!(ctx.locations.read_credentials(USER).unwrap(), None);
         }
     }
 
     fn activated(dir: &Path) -> Context {
         let ctx = context(dir);
         let svc = FakeService::granting(licence(Edition::Business), Some(certificate("act_1")));
-        assert_eq!(activate(&ctx, &svc, "KEY"), ExitCode::Success);
+        assert_eq!(activate(&ctx, &svc, "KEY", USER), ExitCode::Success);
         ctx
     }
 
@@ -829,10 +962,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = activated(dir.path());
         let svc = FakeService::granting(String::new(), None);
-        assert_eq!(deactivate(&ctx, &svc), ExitCode::Success);
+        assert_eq!(deactivate(&ctx, &svc, USER), ExitCode::Success);
         assert_eq!(svc.calls.borrow().as_slice(), ["deactivate:act_1"]);
-        assert_eq!(ctx.locations.read_credentials().unwrap(), None);
-        assert!(ctx.locations.user_license_file().exists());
+        assert_eq!(ctx.locations.read_credentials(USER).unwrap(), None);
+        assert!(ctx.locations.license_file(USER).unwrap().exists());
         assert_eq!(ctx.resolve().edition(), Edition::Community);
     }
 
@@ -841,30 +974,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = activated(dir.path());
         let svc = FakeService::failing(ServiceError::Unavailable("offline".into()));
-        assert_eq!(deactivate(&ctx, &svc), ExitCode::LicenseRequired);
-        assert!(ctx.locations.read_credentials().unwrap().is_some());
+        assert_eq!(deactivate(&ctx, &svc, USER), ExitCode::LicenseRequired);
+        assert!(ctx.locations.read_credentials(USER).unwrap().is_some());
         assert_eq!(ctx.resolve().edition(), Edition::Business);
     }
 
     #[test]
-    fn portal_released_activation_is_cleaned_up_locally() {
+    fn portal_released_activation_is_cleaned_up_locally_on_deactivate() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = activated(dir.path());
         let svc = FakeService::failing(ServiceError::Rejected {
             code: CODE_ACTIVATION_INACTIVE.into(),
             message: "released via portal".into(),
         });
-        assert_eq!(deactivate(&ctx, &svc), ExitCode::Success);
-        assert_eq!(ctx.locations.read_credentials().unwrap(), None);
+        assert_eq!(deactivate(&ctx, &svc, USER), ExitCode::Success);
+        assert_eq!(ctx.locations.read_credentials(USER).unwrap(), None);
     }
 
     #[test]
-    fn deactivate_without_activation_is_a_no_op() {
+    fn deactivate_in_the_wrong_scope_is_a_no_op() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = context(dir.path());
+        let ctx = activated(dir.path());
         let svc = FakeService::failing(ServiceError::NotConfigured);
-        assert_eq!(deactivate(&ctx, &svc), ExitCode::Success);
+        assert_eq!(deactivate(&ctx, &svc, SYSTEM), ExitCode::Success);
         assert!(svc.calls.borrow().is_empty());
+        assert!(ctx.locations.read_credentials(USER).unwrap().is_some());
     }
 
     fn subscription(expires_at: &str) -> String {
@@ -882,7 +1016,7 @@ mod tests {
             subscription("2026-12-01T00:00:00Z"),
             Some(certificate("act_1")),
         );
-        assert_eq!(activate(&ctx, &svc, "KEY"), ExitCode::Success);
+        assert_eq!(activate(&ctx, &svc, "KEY", USER), ExitCode::Success);
 
         let later = Context {
             now: datetime!(2027-01-15 0:00 UTC),
@@ -891,7 +1025,7 @@ mod tests {
         assert_eq!(later.resolve().edition(), Edition::Community);
 
         let renewal = FakeService::granting(subscription("2028-01-01T00:00:00Z"), None);
-        assert_eq!(renew(&later, &renewal), ExitCode::Success);
+        assert_eq!(renew(&later, &renewal, USER), ExitCode::Success);
         assert_eq!(
             renewal.calls.borrow().as_slice(),
             ["renew:lic_test_business:act_1"]
@@ -900,26 +1034,89 @@ mod tests {
     }
 
     #[test]
+    fn renewal_that_is_still_expired_keeps_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path());
+        let svc = FakeService::granting(
+            subscription("2026-12-01T00:00:00Z"),
+            Some(certificate("act_1")),
+        );
+        assert_eq!(activate(&ctx, &svc, "KEY", USER), ExitCode::Success);
+        let later = Context {
+            now: datetime!(2027-01-15 0:00 UTC),
+            ..context(dir.path())
+        };
+        let before = user_licence_text(&later);
+        let renewal = FakeService::granting(subscription("2026-12-01T00:00:00Z"), None);
+        assert_eq!(renew(&later, &renewal, USER), ExitCode::LicenseRequired);
+        assert_eq!(user_licence_text(&later), before);
+    }
+
+    #[test]
     fn failed_renewal_keeps_the_existing_licence() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = context(dir.path());
         let path = file(dir.path(), "e.license", &licence(Edition::Enterprise));
-        assert_eq!(install(&ctx, &path), ExitCode::Success);
-        let before = std::fs::read_to_string(ctx.locations.user_license_file()).unwrap();
+        assert_eq!(install(&ctx, &path, USER), ExitCode::Success);
+        let before = user_licence_text(&ctx);
 
         let wrong_major = licence_with(Edition::Enterprise, |c| c["majorVersion"] = json!(3));
         for svc in [
             FakeService::failing(ServiceError::Unavailable("offline".into())),
-            FakeService::failing(ServiceError::Revoked("refunded".into())),
+            FakeService::failing(ServiceError::NotConfigured),
             FakeService::granting(wrong_major, None),
         ] {
-            assert_eq!(renew(&ctx, &svc), ExitCode::LicenseRequired);
-            assert_eq!(
-                std::fs::read_to_string(ctx.locations.user_license_file()).unwrap(),
-                before
-            );
+            assert_eq!(renew(&ctx, &svc, USER), ExitCode::LicenseRequired);
+            assert_eq!(user_licence_text(&ctx), before);
             assert_eq!(ctx.resolve().edition(), Edition::Enterprise);
         }
+    }
+
+    #[test]
+    fn revocation_reported_by_the_server_is_honoured_and_cleared_by_reissue() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path());
+        let path = file(dir.path(), "e.license", &licence(Edition::Enterprise));
+        assert_eq!(install(&ctx, &path, USER), ExitCode::Success);
+
+        let revoked = FakeService::failing(ServiceError::Revoked("refunded".into()));
+        assert_eq!(renew(&ctx, &revoked, USER), ExitCode::LicenseRequired);
+        let r = ctx.resolve();
+        assert_eq!(r.edition(), Edition::Community);
+        assert_eq!(r.rejected[0].reason, Rejection::Revoked);
+
+        // The licence file is kept, so a later renewal can find it again.
+        let reissued = FakeService::granting(licence(Edition::Enterprise), None);
+        assert_eq!(renew(&ctx, &reissued, USER), ExitCode::Success);
+        assert_eq!(ctx.resolve().edition(), Edition::Enterprise);
+    }
+
+    #[test]
+    fn administrator_revocation_list_is_honoured() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path());
+        let path = file(dir.path(), "e.license", &licence(Edition::Enterprise));
+        assert_eq!(install(&ctx, &path, SYSTEM), ExitCode::Success);
+        file(
+            &dir.path().join("system"),
+            "revocations.json",
+            r#"{"revokedLicenseIds": ["lic_test_enterprise"]}"#,
+        );
+        assert_eq!(ctx.resolve().edition(), Edition::Community);
+    }
+
+    #[test]
+    fn portal_release_reaches_the_device_at_the_next_renewal() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = activated(dir.path());
+        let svc = FakeService::failing(ServiceError::Rejected {
+            code: CODE_ACTIVATION_INACTIVE.into(),
+            message: "released via portal".into(),
+        });
+        assert_eq!(renew(&ctx, &svc, USER), ExitCode::LicenseRequired);
+        assert_eq!(ctx.locations.read_credentials(USER).unwrap(), None);
+        assert_eq!(ctx.resolve().edition(), Edition::Community);
+        assert!(ctx.locations.license_file(USER).unwrap().exists());
     }
 
     #[test]
@@ -927,7 +1124,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = context(dir.path());
         let svc = FakeService::failing(ServiceError::NotConfigured);
-        assert_eq!(renew(&ctx, &svc), ExitCode::LicenseRequired);
+        assert_eq!(renew(&ctx, &svc, USER), ExitCode::LicenseRequired);
         assert!(svc.calls.borrow().is_empty());
     }
 }

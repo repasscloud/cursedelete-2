@@ -52,11 +52,20 @@ expired, wrong-version or untrusted licence means Community, and
 
 ```text
 cursdel license status [--json]
-cursdel license install <PATH>        (alias: import)
-cursdel license activate <KEY>
-cursdel license deactivate
-cursdel license renew                 (alias: refresh)
+cursdel license install <PATH> [--system]      (alias: import)
+cursdel license activate <KEY> [--system]
+cursdel license deactivate [--system]
+cursdel license renew [--system]               (alias: refresh)
 ```
+
+- **`--system`** acts on the machine-wide licence store, for every user of
+  the machine, instead of the current user's. It needs administrator
+  (Windows) or root (macOS/Linux) rights. Installers use it. See
+  [Where licences live](#where-licences-live).
+- **`--license-file <PATH>`** is a global flag, accepted on any command
+  including a deletion run. It uses a licence file in place without
+  installing it, the same as `CURSDEL_LICENSE_FILE`, which suits CI and
+  automation.
 
 ### `status`
 
@@ -86,8 +95,9 @@ Features:
 
 ### `install <PATH>`: offline
 
-Validates a signed licence file and copies it into your per-user licence
-directory. No network access, no device information. This is how
+Validates a signed licence file and copies it into the licence store
+(per-user, or machine-wide with `--system`). No network access, no
+device information. This is how
 Community registrations, Education and Enterprise licences, and
 portal-downloaded Business renewals are normally installed. A file that
 fails validation is rejected with the reason and nothing changes, so an
@@ -130,8 +140,17 @@ Downloads the current signed licence for the installed licence, for
 example after a subscription renewal, and for Business also a refreshed
 activation certificate. It works on an expired subscription too, since
 that is when renewal matters. The new licence is validated before
-anything is replaced, and a failed renewal leaves the existing licence
-exactly as it was.
+anything is replaced, and a failed or unreachable renewal leaves the
+existing licence exactly as it was.
+
+`renew` is also how server-side changes reach a machine:
+
+- If the licence has been **revoked**, CurseDelete records that locally
+  and stops using it. The file is kept, so a later successful renewal,
+  for example after support reverses the revocation, restores it.
+- If this device's Business activation was **released** (through the
+  customer portal or by support), the local activation is removed and
+  Business features stop until you `activate` again.
 
 ## Offline use and revocation
 
@@ -147,36 +166,65 @@ exactly as it was.
   requests are refused. A copy already installed on a machine that stays
   offline cannot be switched off remotely. CurseDelete deliberately
   allows indefinite offline use, so the change reaches that machine only
-  at its next successful `renew`.
+  at its next `renew` (see above).
+- **Administrator-provided revocation:** list licence ids in the
+  machine-wide store's `revocations.json` as
+  `{"revokedLicenseIds": ["lic_..."]}` and CurseDelete will not use those
+  licences, for example in an air-gapped estate. The list is unsigned on
+  purpose: it can only take entitlement away.
 
-## Where licences are read from
+## Where licences live
 
-All locations are per major version (`v2`), so different major versions
-installed side by side keep separate licences. In precedence order:
+Everything is per major version (`v2`), so different major versions
+installed side by side keep separate licences. There are two stores:
 
-1. `CURSDEL_LICENSE_FILE`: one explicit licence file (installer
-   parameter, automation, CI).
-2. The per-user licence written by `install`/`activate`/`renew`.
-3. Every `*.license` or `*.json` file in the administrator directory, for
-   site-wide Education/Enterprise deployment. CurseDelete only reads
-   from it.
-
-| Platform | Per-user directory | Administrator directory |
+| Platform | User store (default) | Machine-wide store (`--system`) |
 |---|---|---|
 | Windows | `%LOCALAPPDATA%\RePassCloud\CurseDelete\v2\` | `%ProgramData%\RePassCloud\CurseDelete\v2\` |
 | macOS | `~/Library/Application Support/CurseDelete/v2/` | `/Library/Application Support/CurseDelete/v2/` |
 | Linux | `~/.config/cursedelete/v2/` (honours `XDG_CONFIG_HOME`) | `/etc/cursedelete/v2/` |
 
-`CURSDEL_LICENSE_DIR` replaces the administrator directory. If several
-valid licences are found, the highest edition wins.
+`CURSDEL_LICENSE_DIR` replaces the machine-wide directory. Licences are
+considered in this order:
 
-The per-user directory also holds the Business activation:
-`activation.json` (the signed certificate) and `credentials.json` (the
-activation id plus the client secret, a bearer credential written
-owner-only `0600` on Unix and never printed). Files are written
-atomically, so an interrupted write can't corrupt a licence. They are
-stored as protected files rather than in an OS keychain because keychain
-prompts would break unattended and CI use.
+1. `--license-file` / `CURSDEL_LICENSE_FILE`: one explicit file, never
+   modified.
+2. The user store's `license.json`.
+3. Every `*.license` or `*.json` licence file in the machine-wide store:
+   the one `--system` commands write, plus any an administrator copies
+   in.
+
+If several are valid, the highest edition wins. `license status` lists
+the rest and why they are not in use.
+
+Each store can also hold a Business activation (`activation.json`, the
+signed certificate, and `credentials.json`, the activation id and its
+client secret) and `revocations.json`. The client secret is a bearer
+credential and is never printed. It is owner-only (`0600`) on Unix; in
+the machine-wide store on Windows it is restricted to SYSTEM and
+Administrators, so `deactivate --system` and `renew --system` need an
+elevated prompt. Files are written atomically, so an interrupted write
+can't corrupt a licence. They are protected files rather than OS
+keychain entries because keychain prompts would break unattended and CI
+use.
+
+## Deploying to many machines
+
+- **Education / Enterprise / registered Community:** put the licence file
+  in the machine-wide store, by `cursdel license install --system <file>`,
+  configuration management copying it into the directory above, or the
+  Windows installer parameters below. Nothing contacts the server and no
+  device information is collected.
+- **Business:** each machine activates once:
+  `cursdel license activate --system <KEY>`, or the installer's
+  activation-key parameter. Each machine uses one seat.
+- **Windows installers:** Inno Setup `/LICENSEFILE="<path>"` or
+  `/ACTIVATIONKEY="<key>"`; MSI `LICENSEFILE="<absolute path>"` or
+  `ACTIVATIONKEY="<key>"`. A licensing problem never fails the install.
+  Check afterwards with `cursdel license status`. See
+  [build/windows/README.md](../build/windows/README.md#licensing-at-install-time).
+- **CI / ephemeral runners:** pass `--license-file` or set
+  `CURSDEL_LICENSE_FILE`. Nothing needs to be installed.
 
 ## How verification works
 
@@ -195,11 +243,11 @@ network:
 
 Any change to a signed claim invalidates the signature. The file format
 and the server API are specified in
-[LICENSING-SERVER-CONTRACT.md](LICENSING-SERVER-CONTRACT.md).
+[LICENSING-SERVER-BRIEF.md](LICENSING-SERVER-BRIEF.md).
 
-> **Note:** this build trusts no production signing keys yet;
-> they will be added once the licensing server publishes them. Until
-> then every licence is reported as signed by an untrusted key, and
+> **Note:** the licensing server publishes the public keys a release
+> trusts, and they are compiled into that release. Until the first keys
+> are added, every licence is reported as signed by an untrusted key and
 > CurseDelete runs as Community.
 
 ECDSA-P256-SHA256 and ML-DSA-65 are FIPS-approved algorithms, but
@@ -211,17 +259,8 @@ FIPS-compliant.
 
 The licensing server's base URL, used only by `activate`, `deactivate`
 and `renew`. It must be `https://` (plain `http://` is accepted only for
-`localhost`/`127.0.0.1`/`[::1]` development). A release build may have a
-default baked in. If neither is set, those three commands say no server
-is configured and everything offline keeps working.
-
-## Migrating from 2.0.0
-
-CurseDelete 2.0.0 used a different licence format
-(`software-license-v1`, ECDSA-P256 over canonical JSON) and storage
-location. Those licence files are no longer accepted: they appear in
-`license status` as not in use, and CurseDelete runs as Community until
-a reissued licence is installed. `activate --license-id … --activation-code …`
-became `activate <KEY>`. `activate --offline` was removed, because
-Business requires online activation and every other edition installs a
-file offline. See [ADR-0010](adr/0010-licensing-v2.md#consequences-and-migration).
+`localhost`/`127.0.0.1`/`[::1]` development). Release builds can have a
+default compiled in (the release workflow reads the
+`CURSDEL_LICENSE_SERVER_URL` repository variable). If neither is set,
+those three commands say no server is configured and everything offline
+keeps working.

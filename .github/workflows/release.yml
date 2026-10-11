@@ -17,6 +17,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Licensing server base URL baked into release binaries (read at compile
+  # time by cursdel-policy; empty = none, and the runtime variable of the
+  # same name can still supply one). Set it as a repository variable once
+  # the licensing server is live. Must be https://.
+  CURSDEL_LICENSE_SERVER_URL: ${{ vars.CURSDEL_LICENSE_SERVER_URL }}
 
 jobs:
   # Fails loudly if someone tags a release without bumping

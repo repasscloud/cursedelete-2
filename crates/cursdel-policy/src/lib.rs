@@ -36,14 +36,15 @@ pub const ALLOWED_ALGORITHMS: &[SignatureAlgorithm] = &[
 ];
 
 /// Public keys this v2 build trusts: `(keyId, algorithm, base64url public
-/// key)`. Add a key here only once the licensing server has published it
-/// and before it is used to issue CurseDelete v2 licences; keep a key for
-/// as long as licences it signed must keep working.
+/// key)`, exactly as the licensing server publishes them (its private keys
+/// never leave the server). Add a key before the server is allowed to
+/// issue CurseDelete v2 licences with it; keep it for as long as licences
+/// it signed must keep working. See `docs/LICENSING-SERVER-BRIEF.md` §7.
 ///
-/// Intentionally empty: no production signing keys exist yet, and they
-/// are never generated in this repository. Until one is added, every
-/// licence is rejected as signed by an untrusted key and the application
-/// runs as Community -- fully functional apart from the gated features.
+/// Empty until the new licensing server generates its first keys. Until
+/// then every licence is rejected as signed by an untrusted key and
+/// CurseDelete runs as Community -- fully functional apart from the gated
+/// features.
 const TRUSTED_KEYS: &[(&str, SignatureAlgorithm, &str)] = &[];
 
 pub const STORAGE: StorageNames = StorageNames {
@@ -101,10 +102,16 @@ pub fn locations() -> LicenseLocations {
 /// else a URL baked in at build time, else none (offline licensing still
 /// works; online commands report that no server is configured).
 pub fn service() -> Result<Box<dyn LicenseService>, InsecureUrl> {
+    // Empty at either level means "unset".
+    let non_empty = |u: &str| !u.trim().is_empty();
     let url = std::env::var(SERVER_URL_ENV)
         .ok()
-        .filter(|u| !u.trim().is_empty())
-        .or_else(|| option_env!("CURSDEL_LICENSE_SERVER_URL").map(str::to_string));
+        .filter(|u| non_empty(u))
+        .or_else(|| {
+            option_env!("CURSDEL_LICENSE_SERVER_URL")
+                .filter(|u| non_empty(u))
+                .map(str::to_string)
+        });
     Ok(match url {
         Some(url) => Box::new(HttpLicenseService::new(&url)?),
         None => Box::new(UnconfiguredService),

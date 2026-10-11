@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "cursdel-cli"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -352,7 +352,7 @@ dependencies = [
 
 [[package]]
 name = "cursdel-core"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "crossbeam-channel",
  "dashmap",
@@ -369,7 +369,7 @@ dependencies = [
 
 [[package]]
 name = "cursdel-license"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "base64",
  "directories",
@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "cursdel-linux"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "cursdel-core",
  "libc",
@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "cursdel-macos"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "cursdel-core",
  "libc",
@@ -408,14 +408,14 @@ dependencies = [
 
 [[package]]
 name = "cursdel-policy"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "cursdel-license",
 ]
 
 [[package]]
 name = "cursdel-windows"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "cursdel-core",
  "tempfile",

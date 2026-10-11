@@ -189,9 +189,15 @@ In short:
   CurseDelete-specific (product id, trusted keys, allowed algorithms,
   storage names, feature table) belongs in `crates/cursdel-policy/`.
 - The file formats and the signed-bytes rule are specified in
-  [LICENSING-SERVER-CONTRACT.md](LICENSING-SERVER-CONTRACT.md). Issued
-  licences depend on them, so treat a format change as a schema-version
-  bump, never an in-place edit.
+  [LICENSING-SERVER-BRIEF.md](LICENSING-SERVER-BRIEF.md) (§4–§5), the
+  document the licensing server is built against. Issued licences depend
+  on them, so treat a format change as a schema-version bump, never an
+  in-place edit. Its embedded test vectors are checked by
+  `cargo test -p cursdel-license vectors`; regenerate them with
+  `UPDATE_LICENSING_VECTORS=1` if signing code changes deliberately.
+- `cargo run -p cursdel-license --example conformance -- --help` validates
+  any licence/certificate with the real client code against supplied
+  public keys (for licensing-server development and support).
 - Tests build signed fixtures in-process with
   `cursdel_license::testing::TestSigner` (deterministic, publicly-known
   keys; the `test-support` feature, dev-dependencies only). Never add a

@@ -249,19 +249,24 @@ licence locations, offline use and revocation, and the
 
 ```text
 cursdel license status [--json]
-cursdel license install <PATH>        (alias: import)
-cursdel license activate <KEY>
-cursdel license deactivate
-cursdel license renew                 (alias: refresh)
+cursdel license install <PATH> [--system]      (alias: import)
+cursdel license activate <KEY> [--system]
+cursdel license deactivate [--system]
+cursdel license renew [--system]               (alias: refresh)
 ```
 
 | Subcommand | Network | Purpose |
 |---|---|---|
 | `status [--json]` | no | Show the edition in effect, the licence and activation behind it, which gated features are enabled, and any licence file found but not in use (with why). |
-| `install <PATH>` | no | Validate a signed licence file and install it for this user. Invalid files are rejected and change nothing. |
+| `install <PATH>` | no | Validate a signed licence file and install it. Invalid files are rejected and change nothing. |
 | `activate <KEY>` | yes | Activate with an activation key. Business registers this device (one seat); other editions just download the licence. |
 | `deactivate` | yes | Business only: release this device's seat. Local activation is removed only after the server confirms. |
-| `renew` | yes | Download the current signed licence (subscription renewal, refreshed activation certificate). A failure leaves the installed licence unchanged. |
+| `renew` | yes | Download the current signed licence (subscription renewal, refreshed activation certificate). Applies a revocation or released activation the server reports; any other failure leaves the installed licence unchanged. |
+
+| Flag | Applies to | Meaning |
+|---|---|---|
+| `--system` | `install`, `activate`, `deactivate`, `renew` | Use the machine-wide licence store instead of the current user's. Needs administrator/root. |
+| `--license-file <PATH>` | every command (global) | Also consider this licence file, without installing it (same as `CURSDEL_LICENSE_FILE`). |
 
 Exit codes: `0` success; `7` (`LicenseRequired`) when a licence is
 rejected or a server operation fails or is refused; `64` when the file
