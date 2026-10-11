@@ -11,9 +11,9 @@ members = [
 ]
 
 [workspace.package]
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.85"
 authors = ["RePassCloud"]
 license = "Apache-2.0"
 repository = "https://github.com/danijeljw-RPC/cursedelete-2"
@@ -39,16 +39,15 @@ num_cpus = "1"
 rand = "0.8"
 base64 = "0.22"
 sha2 = "0.10"
-p256 = { version = "0.13", features = ["ecdsa", "pem"] }
-ecdsa = "0.16"
-signature = "2"
+ed25519-dalek = "2"
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+ml-dsa = { version = "0.1", default-features = false, features = ["alloc"] }
 hex = "0.4"
 directories = "5"
 globset = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 ureq = { version = "2", features = ["json", "tls"] }
-uuid = { version = "1", features = ["v4", "serde"] }
 libc = "0.2"
 ctrlc = "3"
 

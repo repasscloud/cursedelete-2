@@ -241,27 +241,37 @@ gets the extra line.
 
 ## `license` subcommand
 
-Manages license activation. See [LICENSING.md](LICENSING.md) for the full
-model (editions, what's technically gated vs. a licensing-terms
-distinction, storage locations, and the `CURSDEL_LICENSE_SERVER_URL`
-environment variable).
+Manages the licence. See [LICENSING.md](LICENSING.md) for the full model
+(editions, what's technically gated vs. a licensing-terms distinction,
+licence locations, offline use and revocation, and the
+`CURSDEL_LICENSE_FILE` / `CURSDEL_LICENSE_DIR` /
+`CURSDEL_LICENSE_SERVER_URL` environment variables).
 
 ```text
-cursdel license status
-cursdel license activate --license-id <ID> --activation-code <CODE> [--offline] [--output <PATH>]
-cursdel license import <PATH>
-cursdel license deactivate
-cursdel license refresh
+cursdel license status [--json]
+cursdel license install <PATH> [--system]      (alias: import)
+cursdel license activate <KEY> [--system]
+cursdel license deactivate [--system]
+cursdel license renew [--system]               (alias: refresh)
 ```
 
-| Subcommand | Purpose |
-|---|---|
-| `status` | Show the current license/activation status, or confirm the device is running on Community capabilities. |
-| `activate --license-id <ID> --activation-code <CODE>` | Online activation: contacts the license server directly and persists the returned signed license. |
-| `activate --license-id <ID> --activation-code <CODE> --offline [--output <PATH>]` | Air-gapped activation: writes a request file (default `./offline-activation-request.json`) to email to support instead of contacting the server directly. |
-| `import <PATH>` | Import a signed license file received back from an offline activation request. |
-| `deactivate` | Free this device's activation so the license can be activated on another device. |
-| `refresh` | Renew the current online activation lease before it expires. No-op/error for offline-mode activations, which have no lease to refresh. |
+| Subcommand | Network | Purpose |
+|---|---|---|
+| `status [--json]` | no | Show the edition in effect, the licence and activation behind it, which gated features are enabled, and any licence file found but not in use (with why). |
+| `install <PATH>` | no | Validate a signed licence file and install it. Invalid files are rejected and change nothing. |
+| `activate <KEY>` | yes | Activate with an activation key. Business registers this device (one seat); other editions just download the licence. |
+| `deactivate` | yes | Business only: release this device's seat. Local activation is removed only after the server confirms. |
+| `renew` | yes | Download the current signed licence (subscription renewal, refreshed activation certificate). Applies a revocation or released activation the server reports; any other failure leaves the installed licence unchanged. |
+
+| Flag | Applies to | Meaning |
+|---|---|---|
+| `--system` | `install`, `activate`, `deactivate`, `renew` | Use the machine-wide licence store instead of the current user's. Needs administrator/root. |
+| `--license-file <PATH>` | every command (global) | Also consider this licence file, without installing it (same as `CURSDEL_LICENSE_FILE`). |
+
+Exit codes: `0` success; `7` (`LicenseRequired`) when a licence is
+rejected or a server operation fails or is refused; `64` when the file
+given to `install` can't be read; `99` when local licence state can't be
+written.
 
 ## Verified `--help` output
 
@@ -276,7 +286,7 @@ CurseDelete: a native, high-performance deletion engine.
 Usage: cursdel [OPTIONS] [TARGET] [COMMAND]
 
 Commands:
-  license  Manage CurseDelete's licence activation
+  license  Manage CurseDelete's licence
   help     Print this message or the help of the given subcommand(s)
 
 Arguments:

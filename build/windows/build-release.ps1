@@ -388,8 +388,15 @@ function Write-WixSource {
 
     <MediaTemplate EmbedCab="yes" />
 
-    <!-- Optional public property supplied on the msiexec command line. -->
-    <Property Id="DEPLOYMENTKEY" Hidden="yes" Secure="yes" />
+    <!--
+      Optional public licensing properties supplied on the msiexec command line:
+        LICENSEFILE   - absolute path to a signed licence file (offline install).
+        ACTIVATIONKEY - activation key for online activation (needs the release
+                        build's licensing server URL).
+      Both go to the machine-wide licence store (cursdel license ... -system).
+    -->
+    <Property Id="LICENSEFILE" Secure="yes" />
+    <Property Id="ACTIVATIONKEY" Hidden="yes" Secure="yes" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="RePassCloudFolder" Name="RePassCloud">
@@ -463,54 +470,56 @@ function Write-WixSource {
     </Feature>
 
     <!--
-      Optional post-install deployment enrollment.
+      Optional post-install licensing, machine-wide.
 
-      Example:
-        msiexec /i CurseDelete.msi /qn DEPLOYMENTKEY="abcd1234"
+      Examples:
+        msiexec /i CurseDelete.msi /qn LICENSEFILE="C:\Deploy\cursedelete.license"
+        msiexec /i CurseDelete.msi /qn ACTIVATIONKEY="XXXX-XXXX"
 
-      Deferred, non-impersonated execution means this runs elevated after the
-      application files have been installed.
+      Deferred, non-impersonated execution runs as SYSTEM after the files are
+      installed, so the licence lands in %ProgramData%. A licence problem
+      never fails the install (Return=ignore): CurseDelete then runs as
+      Community; check with 'cursdel license status'.
     -->
     <SetProperty
-        Id="EnrollDeploymentKey"
-        Value="&quot;[#CursdelExe]&quot; license enroll --deploymentkey=&quot;[DEPLOYMENTKEY]&quot;"
-        Before="EnrollDeploymentKey"
+        Id="InstallLicenseFile"
+        Value="&quot;[#CursdelExe]&quot; license install --system &quot;[LICENSEFILE]&quot;"
+        Before="InstallLicenseFile"
         Sequence="execute" />
 
     <CustomAction
-        Id="EnrollDeploymentKey"
+        Id="InstallLicenseFile"
         BinaryRef="Wix4UtilCA_`$(sys.BUILDARCHSHORT)"
         DllEntry="WixSilentExec"
         Execute="deferred"
         Impersonate="no"
-        Return="check"
-        HideTarget="yes" />
+        Return="ignore" />
 
-    <!-- Grant BUILTIN\Users Modify to JSON files that exist after enrollment. -->
     <SetProperty
-        Id="SetJsonAcl"
-        Value="&quot;[%ComSpec]&quot; /d /s /c if exist &quot;[INSTALLFOLDER]*.json&quot; icacls &quot;[INSTALLFOLDER]*.json&quot; /grant *S-1-5-32-545:(M) /C"
-        Before="SetJsonAcl"
+        Id="ActivateLicense"
+        Value="&quot;[#CursdelExe]&quot; license activate --system &quot;[ACTIVATIONKEY]&quot;"
+        Before="ActivateLicense"
         Sequence="execute" />
 
     <CustomAction
-        Id="SetJsonAcl"
+        Id="ActivateLicense"
         BinaryRef="Wix4UtilCA_`$(sys.BUILDARCHSHORT)"
         DllEntry="WixSilentExec"
         Execute="deferred"
         Impersonate="no"
-        Return="check" />
+        Return="ignore"
+        HideTarget="yes" />
 
     <InstallExecuteSequence>
       <Custom
-          Action="EnrollDeploymentKey"
+          Action="InstallLicenseFile"
           After="InstallFiles"
-          Condition="NOT Installed AND DEPLOYMENTKEY &lt;&gt; &quot;&quot;" />
+          Condition="NOT Installed AND LICENSEFILE &lt;&gt; &quot;&quot;" />
 
       <Custom
-          Action="SetJsonAcl"
-          After="EnrollDeploymentKey"
-          Condition="NOT Installed" />
+          Action="ActivateLicense"
+          After="InstallLicenseFile"
+          Condition="NOT Installed AND ACTIVATIONKEY &lt;&gt; &quot;&quot;" />
     </InstallExecuteSequence>
 
   </Package>
@@ -570,11 +579,12 @@ Source: "$escapedPayload\CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "$escapedPayload\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Run]
-; Optional deployment enrollment after installation.
-Filename: "{app}\cursdel.exe"; Parameters: "license enroll --deploymentkey=""{code:GetDeploymentKey}"""; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; Check: HasDeploymentKey
-
-; Apply Users=Modify to JSON files created during enrollment.
-Filename: "{cmd}"; Parameters: "/d /s /c if exist ""{app}\*.json"" icacls ""{app}\*.json"" /grant *S-1-5-32-545:(M) /C"; Flags: runhidden waituntilterminated; Check: HasJsonFiles
+; Optional machine-wide licensing after installation:
+;   /LICENSEFILE="C:\Deploy\cursedelete.license"  install a signed licence file (offline)
+;   /ACTIVATIONKEY="XXXX-XXXX"                     activate online (needs the build's licensing server URL)
+; A licence problem never fails the install; CurseDelete then runs as Community.
+Filename: "{app}\cursdel.exe"; Parameters: "license install --system ""{code:GetLicenseFile}"""; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; Check: HasLicenseFile
+Filename: "{app}\cursdel.exe"; Parameters: "license activate --system ""{code:GetActivationKey}"""; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; Check: HasActivationKey
 
 [Code]
 const
@@ -617,24 +627,27 @@ begin
     Result := DefaultInstallPath;
 end;
 
-function GetDeploymentKey(Param: String): String;
+function GetLicenseFile(Param: String): String;
 begin
-  Result := GetNamedParameter('deploymentkey');
+  Result := GetNamedParameter('licensefile');
+
+  if Result <> '' then
+    Result := ExpandFileName(Result);
 end;
 
-function HasDeploymentKey: Boolean;
+function HasLicenseFile: Boolean;
 begin
-  Result := GetDeploymentKey('') <> '';
+  Result := GetLicenseFile('') <> '';
 end;
 
-function HasJsonFiles: Boolean;
-var
-  FindRec: TFindRec;
+function GetActivationKey(Param: String): String;
 begin
-  Result := FindFirst(ExpandConstant('{app}\*.json'), FindRec);
+  Result := GetNamedParameter('activationkey');
+end;
 
-  if Result then
-    FindClose(FindRec);
+function HasActivationKey: Boolean;
+begin
+  Result := GetActivationKey('') <> '';
 end;
 
 function NormalizePathEntry(const Value: String): String;
@@ -1186,8 +1199,9 @@ Installer examples:
   Inno silent:
     .\CurseDelete-v$Version-win-x64-setup.exe /SILENT
 
-  Inno silent + deployment:
-    .\CurseDelete-v$Version-win-x64-setup.exe /SILENT /deploymentkey="abcd1234"
+  Inno silent + licence file / activation key (machine-wide):
+    .\CurseDelete-v$Version-win-x64-setup.exe /SILENT /LICENSEFILE="C:\Deploy\cursedelete.license"
+    .\CurseDelete-v$Version-win-x64-setup.exe /SILENT /ACTIVATIONKEY="XXXX-XXXX"
 
   Inno custom directory:
     .\CurseDelete-v$Version-win-x64-setup.exe /installdir="D:\Apps\CurseDelete"
@@ -1198,8 +1212,9 @@ Installer examples:
   MSI silent:
     msiexec.exe /i "CurseDelete-v$Version-win-x64.msi" /qn
 
-  MSI silent + deployment:
-    msiexec.exe /i "CurseDelete-v$Version-win-x64.msi" /qn DEPLOYMENTKEY="abcd1234"
+  MSI silent + licence file / activation key (machine-wide):
+    msiexec.exe /i "CurseDelete-v$Version-win-x64.msi" /qn LICENSEFILE="C:\Deploy\cursedelete.license"
+    msiexec.exe /i "CurseDelete-v$Version-win-x64.msi" /qn ACTIVATIONKEY="XXXX-XXXX"
 
   MSI custom directory:
     msiexec.exe /i "CurseDelete-v$Version-win-x64.msi" /qn INSTALLFOLDER="D:\Apps\CurseDelete"
@@ -1207,7 +1222,8 @@ Installer examples:
   MSIX:
     Add-AppxPackage ".\CurseDelete-v$Version-win-x64.msix"
 
-  MSIX deployment enrollment (run after install):
-    cursdel.exe license enroll --deploymentkey=abcd1234
+  MSIX licensing (run after install, elevated):
+    cursdel.exe license install --system C:\Deploy\cursedelete.license
+    cursdel.exe license activate --system XXXX-XXXX
 
 "@ -ForegroundColor Green

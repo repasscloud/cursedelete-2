@@ -59,22 +59,22 @@ The PFX in `certs\` is not required for local builds once imported. Keep the PFX
 Interactive:
 
 ```powershell
-.\CurseDelete-v2.0.0-win-x64-setup.exe
+.\CurseDelete-v2.1.0-win-x64-setup.exe
 ```
 
 Silent:
 
 ```powershell
-.\CurseDelete-v2.0.0-win-x64-setup.exe /SILENT
+.\CurseDelete-v2.1.0-win-x64-setup.exe /SILENT
 ```
 
-Silent with custom path and deployment enrollment:
+Silent with custom path and a licence (see [Licensing at install time](#licensing-at-install-time)):
 
 ```powershell
-.\CurseDelete-v2.0.0-win-x64-setup.exe `
+.\CurseDelete-v2.1.0-win-x64-setup.exe `
   /SILENT `
   /installdir="D:\Apps\CurseDelete" `
-  /deploymentkey="abcd1234"
+  /LICENSEFILE="C:\Deploy\cursedelete.license"
 ```
 
 Inno Setup natively uses `/SILENT` or `/VERYSILENT`; `/s` is not used.
@@ -84,22 +84,22 @@ Inno Setup natively uses `/SILENT` or `/VERYSILENT`; `/s` is not used.
 Interactive:
 
 ```powershell
-msiexec.exe /i .\CurseDelete-v2.0.0-win-x64.msi
+msiexec.exe /i .\CurseDelete-v2.1.0-win-x64.msi
 ```
 
 Silent:
 
 ```powershell
-msiexec.exe /i .\CurseDelete-v2.0.0-win-x64.msi /qn
+msiexec.exe /i .\CurseDelete-v2.1.0-win-x64.msi /qn
 ```
 
-Silent with custom path and deployment enrollment:
+Silent with custom path and a licence:
 
 ```powershell
-msiexec.exe /i .\CurseDelete-v2.0.0-win-x64.msi `
+msiexec.exe /i .\CurseDelete-v2.1.0-win-x64.msi `
   /qn `
   INSTALLFOLDER="D:\Apps\CurseDelete" `
-  DEPLOYMENTKEY="abcd1234"
+  ACTIVATIONKEY="XXXX-XXXX"
 ```
 
 ### MSIX
@@ -107,25 +107,38 @@ msiexec.exe /i .\CurseDelete-v2.0.0-win-x64.msi `
 MSIX installs into a Windows-managed package location and exposes `cursdel.exe`
 through an application execution alias.
 
-MSIX cannot implement the MSI/Inno arbitrary `/deploymentkey` post-install
-workflow. Enroll after installation:
+MSIX cannot run post-install commands. License after installation from an
+elevated prompt:
 
 ```powershell
-cursdel.exe license enroll --deploymentkey=abcd1234
+cursdel.exe license install --system C:\Deploy\cursedelete.license
+# or
+cursdel.exe license activate --system XXXX-XXXX
 ```
 
-## JSON ACL note
+## Licensing at install time
 
-The MSI and Inno installers run:
+| Inno Setup | MSI property | Runs (as admin/SYSTEM) | Use for |
+|---|---|---|---|
+| `/LICENSEFILE="<path>"` | `LICENSEFILE="<absolute path>"` | `cursdel license install --system <path>` | Community, Education, Enterprise licence files; offline, no device data |
+| `/ACTIVATIONKEY="<key>"` | `ACTIVATIONKEY="<key>"` | `cursdel license activate --system <key>` | Online activation: Business (registers this machine) or online provisioning of other editions |
 
-```text
-icacls "<install-dir>\*.json" /grant BUILTIN\Users:(M)
-```
+Both write to the machine-wide licence store,
+`%ProgramData%\RePassCloud\CurseDelete\v2\`, so every user on the machine
+gets the licence. See [docs/LICENSING.md](../../docs/LICENSING.md).
 
-after optional enrollment, so JSON files that exist at that time receive
-machine-wide Users Modify permission.
-
-Windows ACL inheritance cannot automatically apply a different ACL based on a
-future file's extension. If CurseDelete creates additional JSON files later,
-the application should set that ACL when creating them, or mutable machine
-state should be moved to `%ProgramData%\RePassCloud\CurseDelete`.
+- The licence file is validated before anything is written. A licensing
+  problem never fails the installation (MSI `Return="ignore"`), and
+  CurseDelete then runs as Community. Verify afterwards with
+  `cursdel license status`.
+- `ACTIVATIONKEY` needs the licensing server URL baked into the release
+  build (`CURSDEL_LICENSE_SERVER_URL` set at compile time), because the
+  installer's process environment can't supply one. The MSI hides the key
+  from action logging (`HideTarget`). Inno includes `[Run]` parameters in
+  its log only when run with `/LOG`.
+- Nothing is written into the installation directory. A machine-wide
+  Business activation's client secret (`credentials.json`) is restricted to
+  SYSTEM and Administrators, so `license deactivate --system` and
+  `license renew --system` need an elevated prompt.
+- Administrators can also copy a licence file into that directory by hand
+  (`*.license` or `*.json`); CurseDelete picks it up automatically.

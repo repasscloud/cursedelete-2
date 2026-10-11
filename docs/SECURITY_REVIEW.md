@@ -37,7 +37,10 @@ from anything covered above.
   bypass found beyond the two TOCTOU gaps already disclosed and accepted
   in [ADR-0006](adr/0006-posix-toctou.md) and
   [ADR-0007](adr/0007-windows-engine.md).
-- **License signature verification**: format/algorithm are hardcoded
+- **License signature verification** *(reviewed against the 2.0.0
+  `software-license-v1` verifier, since replaced by licensing v2 — see
+  [ADR-0010](adr/0010-licensing-v2.md); the new verifier has not had an
+  independent review pass yet)*: format/algorithm are hardcoded
   checks, the signing key must already be present in the compiled-in
   trust store (no way to smuggle in an attacker key), canonical-JSON
   bytes are computed correctly over the envelope minus the signature

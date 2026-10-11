@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted.
+Superseded by [ADR-0010](0010-licensing-v2.md). Kept for history: the
+`software-license-v1` format, the .NET-server interop, and the
+`LICENSING-INTEGRATION.md` protocol it describes are no longer used
+(that file was removed; it remains in git history).
 
 ## Context
 
